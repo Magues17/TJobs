@@ -53,7 +53,7 @@ export default function EmployerLoginPage({
 
       <Card title="Sign In">
         <form onSubmit={handleSubmit} className="space-y-5">
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-700">
             <span className="font-semibold">Username:</span> Use the same email address you entered during employer setup.
           </div>
 
@@ -87,14 +87,14 @@ export default function EmployerLoginPage({
             <button
               type="button"
               onClick={() => setCurrentPage('employer-forgot-password')}
-              className="text-sm font-medium text-emerald-700 hover:underline"
+              className="text-sm font-medium text-cyan-300 hover:underline"
             >
               Forgot your password?
             </button>
           </div>
 
           {error && (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+            <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {error}
             </div>
           )}
@@ -103,7 +103,7 @@ export default function EmployerLoginPage({
             <button
               type="submit"
               disabled={loading}
-              className="rounded-2xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-2xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-sm hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {loading ? 'Signing In...' : 'Sign In'}
             </button>
@@ -111,7 +111,7 @@ export default function EmployerLoginPage({
             <button
               type="button"
               onClick={() => setCurrentPage('list-business')}
-              className="text-sm font-medium text-emerald-700 hover:underline"
+              className="text-sm font-medium text-cyan-300 hover:underline"
             >
               Need an employer plan?
             </button>

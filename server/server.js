@@ -398,6 +398,7 @@ async function loadEmployerSessionByUserId(userId) {
       e.business_name,
       e.industry,
       e.contact_name,
+      e.email AS employer_email,
       e.phone,
       e.website,
       e.address,
@@ -484,6 +485,7 @@ async function requireEmployerAuth(req, res, next) {
         business_name: session.business_name,
         industry: session.industry,
         contact_name: session.contact_name,
+        email: session.employer_email || session.email,
         phone: session.phone,
         website: session.website,
         address: session.address,
@@ -599,27 +601,6 @@ async function findJobOwnedByEmployer(jobId, employerId) {
   return rows[0]
 }
 
-async function findJobSeekerVisibleToEmployer(jobSeekerId, employerId) {
-  const [rows] = await pool.query(
-    `
-    SELECT
-      js.id,
-      js.job_post_id,
-      jp.employer_id,
-      jp.job_title
-    FROM job_seekers js
-    INNER JOIN job_posts jp ON jp.id = js.job_post_id
-    WHERE js.id = ?
-    LIMIT 1
-    `,
-    [jobSeekerId]
-  )
-
-  if (!rows.length) return null
-  if (Number(rows[0].employer_id) !== Number(employerId)) return false
-  return rows[0]
-}
-
 async function revokePendingTokensForEmployer(db, employerId) {
   await db.query(
     `
@@ -651,7 +632,6 @@ app.get('/api/health', async (req, res) => {
 
 app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
   try {
-    const jobPostId = Number(req.body.job_post_id)
     const fullName = safeTrim(req.body.full_name, 255)
     const email = normalizeEmail(req.body.email)
     const phone = toNullableString(req.body.phone, 50)
@@ -660,13 +640,6 @@ app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
     const employmentType = toNullableString(req.body.employment_type, 50) || 'any'
     const skills = toNullableString(req.body.skills, 5000)
     const resumeText = toNullableString(req.body.resume_text, 50000)
-
-    if (!jobPostId) {
-      return res.status(400).json({
-        success: false,
-        error: 'A valid job_post_id is required.',
-      })
-    }
 
     if (!fullName || !email) {
       return res.status(400).json({
@@ -682,53 +655,12 @@ app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
       })
     }
 
-    const [jobRows] = await pool.query(
-      `
-      SELECT
-        jp.id,
-        jp.employer_id,
-        jp.job_title,
-        jp.status,
-        e.access_status,
-        e.onboarding_completed
-      FROM job_posts jp
-      INNER JOIN employers e ON e.id = jp.employer_id
-      WHERE jp.id = ?
-      LIMIT 1
-      `,
-      [jobPostId]
-    )
-
-        if (!jobRows.length) {
-      return res.status(404).json({
-        success: false,
-        error: 'Job not found.',
-      })
-    }
-
-    const jobRow = jobRows[0]
-
-    if (jobRow.status !== 'open') {
-      return res.status(400).json({
-        success: false,
-        error: 'This job is not accepting applications.',
-      })
-    }
-
-    if (jobRow.access_status !== 'active' || !jobRow.onboarding_completed) {
-      return res.status(400).json({
-        success: false,
-        error: 'This employer is not currently accepting applications.',
-      })
-    }
-
     const resumeFileUrl = req.file ? `/uploads/resumes/${req.file.filename}` : null
 
     const [result] = await pool.query(
       `
       INSERT INTO job_seekers
       (
-        job_post_id,
         full_name,
         email,
         phone,
@@ -739,10 +671,9 @@ app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
         resume_text,
         resume_file_url
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
-        jobPostId,
         fullName,
         email,
         phone,
@@ -758,15 +689,14 @@ app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
     res.json({
       success: true,
       id: result.insertId,
-      job_post_id: jobPostId,
       resume_file_url: resumeFileUrl,
-      message: 'Application submitted successfully.',
+      message: 'Resume submitted successfully.',
     })
   } catch (error) {
     console.error('POST /api/jobseekers error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to submit application.',
+      error: error?.message || 'Failed to submit resume.',
     })
   }
 })
@@ -1398,7 +1328,7 @@ app.post('/api/employer-auth/forgot-password', async (req, res) => {
 
     const user = rows[0]
 
-        if (!user.is_active || !user.onboarding_completed || !isEmployerEligible(user)) {
+    if (!user.is_active || !user.onboarding_completed || !isEmployerEligible(user)) {
       return res.json({
         success: true,
         message: genericMessage,
@@ -1671,6 +1601,212 @@ app.get('/api/employer-auth/me', requireEmployerAuth, async (req, res) => {
     employer_user: req.auth.employer_user,
     employer: req.auth.employer,
   })
+})
+
+app.patch('/api/employer/account', requireEmployerAuth, async (req, res) => {
+  try {
+    const employerId = req.auth.employer_id
+    const employerUserId = req.auth.user_id
+    const businessName = safeTrim(req.body.business_name, 255)
+    const industry = toNullableString(req.body.industry, 255)
+    const contactName = toNullableString(req.body.contact_name, 255)
+    const email = normalizeEmail(req.body.email)
+    const phone = toNullableString(req.body.phone, 100)
+    const website = toNullableString(req.body.website, 255)
+    const address = toNullableString(req.body.address, 255)
+    const city = toNullableString(req.body.city, 255)
+    const notes = toNullableString(req.body.notes, 5000)
+    const isHiring = parseBoolean(req.body.is_hiring)
+
+    if (!businessName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Business name is required.',
+      })
+    }
+
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid email address is required.',
+      })
+    }
+
+    const [emailConflicts] = await pool.query(
+      `
+      SELECT id
+      FROM employer_users
+      WHERE email = ? AND id <> ?
+      LIMIT 1
+      `,
+      [email, employerUserId]
+    )
+
+    if (emailConflicts.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'That email address is already being used by another employer login.',
+      })
+    }
+
+    await pool.query(
+      `
+      UPDATE employers
+      SET
+        business_name = ?,
+        industry = ?,
+        contact_name = ?,
+        email = ?,
+        phone = ?,
+        website = ?,
+        address = ?,
+        city = ?,
+        notes = ?,
+        status = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `,
+      [
+        businessName,
+        industry,
+        contactName,
+        email,
+        phone,
+        website,
+        address,
+        city,
+        notes,
+        isHiring ? 'active' : 'new',
+        employerId,
+      ]
+    )
+
+    await pool.query(
+      `
+      UPDATE employer_users
+      SET
+        email = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `,
+      [email, employerUserId]
+    )
+
+    const refreshedSession = await loadEmployerSessionByUserId(employerUserId)
+
+    res.json({
+      success: true,
+      message: 'Employer account updated successfully.',
+      employer_user: {
+        id: Number(refreshedSession.id),
+        employer_id: Number(refreshedSession.employer_id),
+        email: refreshedSession.email,
+        is_active: !!refreshedSession.is_active,
+      },
+      employer: {
+        business_name: refreshedSession.business_name,
+        industry: refreshedSession.industry,
+        contact_name: refreshedSession.contact_name,
+        email: refreshedSession.employer_email || refreshedSession.email,
+        phone: refreshedSession.phone,
+        website: refreshedSession.website,
+        address: refreshedSession.address,
+        city: refreshedSession.city,
+        notes: refreshedSession.notes,
+        status: refreshedSession.status,
+        subscription_status: refreshedSession.subscription_status,
+        access_status: refreshedSession.access_status,
+        current_period_end: refreshedSession.current_period_end,
+        onboarding_completed: !!refreshedSession.onboarding_completed,
+      },
+    })
+  } catch (error) {
+    console.error('PATCH /api/employer/account error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to update employer account.',
+    })
+  }
+})
+
+app.patch('/api/employer/account/password', requireEmployerAuth, async (req, res) => {
+  try {
+    const employerUserId = req.auth.user_id
+    const currentPassword = String(req.body.current_password || '')
+    const newPassword = String(req.body.new_password || '')
+    const confirmPassword = String(req.body.confirm_password || '')
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        error: 'Current password, new password, and confirmation are required.',
+      })
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        error: 'New password and confirm password do not match.',
+      })
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        error: 'New password must be at least 8 characters long.',
+      })
+    }
+
+    const [rows] = await pool.query(
+      `
+      SELECT password_hash
+      FROM employer_users
+      WHERE id = ?
+      LIMIT 1
+      `,
+      [employerUserId]
+    )
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        error: 'Employer login not found.',
+      })
+    }
+
+    const matches = await bcrypt.compare(currentPassword, rows[0].password_hash)
+
+    if (!matches) {
+      return res.status(400).json({
+        success: false,
+        error: 'Current password is incorrect.',
+      })
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10)
+
+    await pool.query(
+      `
+      UPDATE employer_users
+      SET
+        password_hash = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `,
+      [passwordHash, employerUserId]
+    )
+
+    res.json({
+      success: true,
+      message: 'Password updated successfully.',
+    })
+  } catch (error) {
+    console.error('PATCH /api/employer/account/password error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to update employer password.',
+    })
+  }
 })
 
 app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, async (req, res) => {
@@ -2034,13 +2170,11 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
           END
         ) AS follow_ups_due
       FROM job_seekers js
-      INNER JOIN job_posts jp ON jp.id = js.job_post_id
       LEFT JOIN employer_candidate_actions eca
         ON eca.job_seeker_id = js.id
        AND eca.employer_id = ?
-      WHERE jp.employer_id = ?
       `,
-      [now, employerId, employerId]
+      [now, employerId]
     )
 
     res.json({
@@ -2074,7 +2208,6 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
     const city = safeTrim(req.query.city, 255)
     const employmentType = safeTrim(req.query.employment_type, 50)
     const candidateStatus = normalizeCandidateStatus(req.query.candidate_status)
-    const jobPostId = Number(req.query.job_post_id || 0)
 
     if (candidateStatus && !ALLOWED_CANDIDATE_STATUSES.has(candidateStatus)) {
       return res.status(400).json({
@@ -2083,13 +2216,8 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       })
     }
 
-    const whereParts = ['jp.employer_id = ?']
-    const params = [employerId]
-
-    if (jobPostId) {
-      whereParts.push('js.job_post_id = ?')
-      params.push(jobPostId)
-    }
+    const whereParts = []
+    const params = []
 
     if (search) {
       whereParts.push(`
@@ -2099,11 +2227,10 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
           OR js.desired_job_title LIKE ?
           OR js.skills LIKE ?
           OR js.resume_text LIKE ?
-          OR jp.job_title LIKE ?
         )
       `)
       const like = `%${search}%`
-      params.push(like, like, like, like, like, like)
+      params.push(like, like, like, like, like)
     }
 
     if (city) {
@@ -2121,13 +2248,12 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       params.push(candidateStatus)
     }
 
-    const whereSql = `WHERE ${whereParts.join(' AND ')}`
+    const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : ''
 
     const [countRows] = await pool.query(
       `
       SELECT COUNT(*) AS total
       FROM job_seekers js
-      INNER JOIN job_posts jp ON jp.id = js.job_post_id
       LEFT JOIN employer_candidate_actions eca
         ON eca.job_seeker_id = js.id
        AND eca.employer_id = ?
@@ -2142,8 +2268,6 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       `
       SELECT
         js.id,
-        js.job_post_id,
-        jp.job_title AS applied_job_title,
         js.full_name,
         js.email,
         js.phone,
@@ -2165,7 +2289,6 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
         eca.next_follow_up_at,
         eca.updated_at AS candidate_updated_at
       FROM job_seekers js
-      INNER JOIN job_posts jp ON jp.id = js.job_post_id
       LEFT JOIN employer_candidate_actions eca
         ON eca.job_seeker_id = js.id
        AND eca.employer_id = ?
@@ -2178,8 +2301,6 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
 
     const resumes = rows.map((row) => ({
       id: row.id,
-      job_post_id: row.job_post_id,
-      applied_job_title: row.applied_job_title,
       full_name: row.full_name,
       email: row.email,
       phone: row.phone,
@@ -2222,7 +2343,6 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
         city,
         employment_type: employmentType,
         candidate_status: candidateStatus || '',
-        job_post_id: jobPostId || null,
       },
     })
   } catch (error) {
@@ -2268,19 +2388,20 @@ app.post(
         })
       }
 
-      const visibleCandidate = await findJobSeekerVisibleToEmployer(jobSeekerId, employerId)
+      const [jobSeekers] = await pool.query(
+        `
+        SELECT id
+        FROM job_seekers
+        WHERE id = ?
+        LIMIT 1
+        `,
+        [jobSeekerId]
+      )
 
-      if (visibleCandidate === null) {
+      if (!jobSeekers.length) {
         return res.status(404).json({
           success: false,
           error: 'Candidate not found.',
-        })
-      }
-
-      if (visibleCandidate === false) {
-        return res.status(403).json({
-          success: false,
-          error: 'You do not have permission to modify this candidate.',
         })
       }
 
@@ -2360,7 +2481,7 @@ app.post(
         ]
       )
 
-            const action = await fetchCandidateActionById(result.insertId)
+      const action = await fetchCandidateActionById(result.insertId)
 
       res.json({
         success: true,

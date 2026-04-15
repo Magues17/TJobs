@@ -17,6 +17,8 @@ import {
 } from 'lucide-react'
 import {
   loadEmployerSession as apiLoadEmployerSession,
+  updateEmployerAccount as apiUpdateEmployerAccount,
+  updateEmployerPassword as apiUpdateEmployerPassword,
   loadEmployerJobs as apiLoadEmployerJobs,
   loadEmployerStats as apiLoadEmployerStats,
   loadEmployerResumes as apiLoadEmployerResumes,
@@ -73,15 +75,22 @@ function getInitialPage() {
   return 'jobs'
 }
 
+function formatPostedDate(value) {
+  if (!value) return 'Recently posted'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Recently posted'
+  return date.toLocaleDateString()
+}
+
 function Shell({ currentPage, setCurrentPage, employerSession, onLogout, children }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const navItems = [
-    { key: 'jobs', label: 'Job Board', icon: Briefcase },
+    { key: 'jobs', label: 'Jobs', icon: Briefcase },
     { key: 'businesses', label: 'Businesses', icon: Building2 },
-    { key: 'list-business', label: 'Join as Employer', icon: Landmark },
+    { key: 'list-business', label: 'For Employers', icon: Landmark },
     employerSession
-      ? { key: 'employer-dashboard', label: 'Employer Dashboard', icon: LayoutDashboard }
+      ? { key: 'employer-dashboard', label: 'Dashboard', icon: LayoutDashboard }
       : { key: 'employer-login', label: 'Employer Login', icon: LayoutDashboard },
   ]
 
@@ -100,22 +109,24 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
   }
 
   return (
-    <div className="min-h-screen bg-[#f7f6f3] text-slate-900">
-      <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-[#fbfaf7]/95 backdrop-blur">
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="fixed inset-0 -z-10 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.14),transparent_28%),linear-gradient(180deg,#020617_0%,#0f172a_55%,#020617_100%)]" />
+
+      <header className="sticky top-0 z-40 border-b border-slate-800/90 bg-slate-950/85 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-5">
           <button
             onClick={() => handleNavClick('jobs')}
             className="min-w-0 flex items-center gap-3 text-left"
           >
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 text-white shadow-sm">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-300 shadow-[0_12px_30px_rgba(34,211,238,0.16)]">
               <MapPin className="h-5 w-5" />
             </div>
             <div className="min-w-0">
-              <div className="truncate font-serif text-xl font-bold leading-none tracking-tight sm:text-2xl">
-                Tarboro
+              <div className="truncate text-lg font-semibold tracking-tight text-white sm:text-xl">
+                TarboroJobs
               </div>
-              <div className="truncate text-[11px] text-slate-500 sm:text-xs">
-                Jobs &amp; Business Hub
+              <div className="truncate text-[11px] text-slate-400 sm:text-xs">
+                Local jobs and employers around Tarboro
               </div>
             </div>
           </button>
@@ -132,8 +143,8 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
                     onClick={() => handleNavClick(item.key)}
                     className={`inline-flex items-center gap-2 rounded-2xl border px-3.5 py-2 text-sm font-medium transition ${
                       active
-                        ? 'border-emerald-700 bg-emerald-700 text-white shadow-sm'
-                        : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400'
+                        ? 'border-cyan-400/30 bg-cyan-400 text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)]'
+                        : 'border-slate-700 bg-slate-900/85 text-slate-300 hover:border-slate-600 hover:text-white'
                     }`}
                   >
                     <Icon className="h-4 w-4" />
@@ -146,7 +157,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
             {employerSession && (
               <button
                 onClick={handleLogoutClick}
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 hover:border-slate-400"
+                className="inline-flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-900/85 px-3.5 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white"
               >
                 <LogOut className="h-4 w-4" />
                 Logout
@@ -159,14 +170,14 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
             aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
             aria-expanded={mobileMenuOpen}
             onClick={() => setMobileMenuOpen((prev) => !prev)}
-            className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-300 bg-white text-slate-700 shadow-sm md:hidden"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/85 text-slate-300 shadow-sm transition hover:border-slate-600 hover:text-white md:hidden"
           >
             {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
         </div>
 
         {mobileMenuOpen && (
-          <div className="border-t border-slate-200 bg-[#fbfaf7] px-4 py-3 md:hidden">
+          <div className="border-t border-slate-800 bg-slate-950/95 px-4 py-3 md:hidden">
             <nav className="flex flex-col gap-2">
               {navItems.map((item) => {
                 const Icon = item.icon
@@ -178,8 +189,8 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
                     onClick={() => handleNavClick(item.key)}
                     className={`flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left text-sm font-medium transition ${
                       active
-                        ? 'border-emerald-700 bg-emerald-700 text-white shadow-sm'
-                        : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400'
+                        ? 'border-cyan-400/30 bg-cyan-400 text-slate-950'
+                        : 'border-slate-700 bg-slate-900/80 text-slate-300 hover:border-slate-600 hover:text-white'
                     }`}
                   >
                     <Icon className="h-4 w-4 shrink-0" />
@@ -191,7 +202,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
               {employerSession && (
                 <button
                   onClick={handleLogoutClick}
-                  className="mt-1 flex w-full items-center gap-3 rounded-2xl border border-slate-300 bg-white px-4 py-3 text-left text-sm font-medium text-slate-700 hover:border-slate-400"
+                  className="mt-1 flex w-full items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-3 text-left text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white"
                 >
                   <LogOut className="h-4 w-4 shrink-0" />
                   <span>Logout</span>
@@ -211,10 +222,13 @@ function SectionHeader({ title, subtitle, action }) {
   return (
     <div className="mb-5 flex flex-col gap-3 md:mb-6 md:flex-row md:items-end md:justify-between">
       <div className="min-w-0">
-        <h1 className="font-serif text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl md:text-4xl">
+        <div className="mb-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">
+          Midnight Civic
+        </div>
+        <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
           {title}
         </h1>
-        <p className="mt-1.5 max-w-3xl text-sm text-slate-500 sm:text-base md:text-lg">
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400 sm:text-base">
           {subtitle}
         </p>
       </div>
@@ -234,22 +248,22 @@ function SearchRow({
   showType = false,
 }) {
   return (
-    <div className="mb-5 rounded-3xl border border-slate-200 bg-white p-3 shadow-sm sm:mb-6 sm:p-4">
-      <div className="grid gap-3 lg:grid-cols-[1fr_220px_180px]">
-        <div className="flex min-h-[52px] items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3">
-          <Search className="h-4 w-4 shrink-0 text-slate-400" />
+    <div className="mb-5 rounded-[30px] border border-slate-800 bg-slate-900/85 p-3 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:mb-6 sm:p-4">
+      <div className="grid gap-3 lg:grid-cols-[1fr_220px_190px]">
+        <div className="flex min-h-[54px] items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
+          <Search className="h-4 w-4 shrink-0 text-slate-500" />
           <input
-            className="w-full bg-transparent text-sm outline-none placeholder:text-slate-400"
+            className="w-full bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
             placeholder={placeholder}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
 
-        <div className="flex min-h-[52px] items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3">
-          <ListFilter className="h-4 w-4 shrink-0 text-slate-400" />
+        <div className="flex min-h-[54px] items-center gap-2 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
+          <ListFilter className="h-4 w-4 shrink-0 text-slate-500" />
           <select
-            className="w-full bg-transparent text-sm outline-none"
+            className="w-full bg-transparent text-sm text-slate-100 outline-none"
             value={industry}
             onChange={(e) => setIndustry(e.target.value)}
           >
@@ -260,10 +274,10 @@ function SearchRow({
         </div>
 
         {showType ? (
-          <div className="flex min-h-[52px] items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3">
-            <Briefcase className="h-4 w-4 shrink-0 text-slate-400" />
+          <div className="flex min-h-[54px] items-center gap-2 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
+            <Briefcase className="h-4 w-4 shrink-0 text-slate-500" />
             <select
-              className="w-full bg-transparent text-sm outline-none"
+              className="w-full bg-transparent text-sm text-slate-100 outline-none"
               value={type}
               onChange={(e) => setType(e.target.value)}
             >
@@ -273,12 +287,9 @@ function SearchRow({
             </select>
           </div>
         ) : (
-          <button
-            type="button"
-            className="min-h-[52px] rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:border-slate-400"
-          >
-            Hiring Now
-          </button>
+          <div className="flex min-h-[54px] items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm font-medium text-slate-300">
+            Local-first directory
+          </div>
         )}
       </div>
     </div>
@@ -288,8 +299,8 @@ function SearchRow({
 function Field({ label, required = false, children }) {
   return (
     <label className="block">
-      <div className="mb-2 text-sm font-semibold text-slate-800">
-        {label} {required && <span className="text-rose-500">*</span>}
+      <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+        {label} {required && <span className="text-rose-400">*</span>}
       </div>
       {children}
     </label>
@@ -300,7 +311,7 @@ function Input({ className = '', ...props }) {
   return (
     <input
       {...props}
-      className={`w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-600 ${className}`}
+      className={`w-full rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-400 ${className}`}
     />
   )
 }
@@ -309,7 +320,7 @@ function Select({ className = '', ...props }) {
   return (
     <select
       {...props}
-      className={`w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-emerald-600 ${className}`}
+      className={`w-full rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400 ${className}`}
     />
   )
 }
@@ -318,21 +329,52 @@ function Textarea({ className = '', ...props }) {
   return (
     <textarea
       {...props}
-      className={`w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-600 ${className}`}
+      className={`w-full rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-400 ${className}`}
     />
   )
 }
 
 function Card({ title, children }) {
   return (
-    <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
-      <h2 className="mb-4 text-base font-semibold text-slate-900 sm:mb-5 sm:text-lg">{title}</h2>
+    <section className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+      <h2 className="mb-4 text-lg font-semibold text-white sm:mb-5">{title}</h2>
       <div className="space-y-5">{children}</div>
     </section>
   )
 }
 
-function JobsPage({ jobs }) {
+function StatStrip({ items }) {
+  return (
+    <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {items.map((item) => (
+        <div
+          key={item.label}
+          className="rounded-[26px] border border-slate-800 bg-slate-900/70 p-4 shadow-[0_16px_40px_rgba(2,6,23,0.22)]"
+        >
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+            {item.label}
+          </div>
+          <div className="mt-2 text-3xl font-semibold tracking-tight text-white">{item.value}</div>
+          {item.note ? <div className="mt-1 text-xs text-slate-500">{item.note}</div> : null}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function EmptyState({ icon: Icon, title, body }) {
+  return (
+    <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-8 text-center shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-10">
+      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-3xl border border-slate-700 bg-slate-950/70 text-cyan-300">
+        <Icon className="h-7 w-7" />
+      </div>
+      <h3 className="text-lg font-semibold text-white">{title}</h3>
+      <p className="mt-2 text-sm leading-6 text-slate-400">{body}</p>
+    </div>
+  )
+}
+
+function JobsPage({ jobs, loading }) {
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
   const [type, setType] = useState('All Types')
@@ -357,12 +399,48 @@ function JobsPage({ jobs }) {
     })
   }, [jobs, search, industry, type])
 
+  const activeCities = new Set(jobs.map((job) => job.city).filter(Boolean)).size
+
   return (
     <div>
       <SectionHeader
         title="Local Job Board"
-        subtitle="Explore open roles from active employers in and around Tarboro."
+        subtitle="A cleaner phone-first job board for Tarboro, nearby towns, and active local employers."
       />
+
+      <div className="mb-5 grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className="relative overflow-hidden rounded-[32px] border border-slate-800 bg-slate-900/90 p-5 shadow-[0_22px_70px_rgba(2,6,23,0.28)] sm:p-6">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.18),transparent_30%)]" />
+          <div className="relative">
+            <div className="mb-3 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">
+              Find work close to home
+            </div>
+            <h2 className="max-w-2xl text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+              Local jobs without the clutter.
+            </h2>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">
+              Browse current openings, filter by industry, and keep the experience clean on both desktop and phone.
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-[32px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_22px_70px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Board snapshot</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="text-xs text-slate-400">Open jobs</div>
+              <div className="mt-1 text-2xl font-semibold text-white">{jobs.length}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="text-xs text-slate-400">Cities</div>
+              <div className="mt-1 text-2xl font-semibold text-white">{activeCities || 0}</div>
+            </div>
+          </div>
+          <div className="mt-4 text-sm leading-6 text-slate-400">
+            The goal here is simple: faster scanning, stronger contrast, and better readability on smaller screens.
+          </div>
+        </div>
+      </div>
 
       <SearchRow
         placeholder="Search jobs, companies, or keywords"
@@ -375,72 +453,80 @@ function JobsPage({ jobs }) {
         showType
       />
 
-      {filteredJobs.length === 0 ? (
-        <div className="rounded-[28px] border border-slate-200 bg-white p-8 text-center shadow-sm sm:p-10">
-          <Briefcase className="mx-auto mb-4 h-10 w-10 text-slate-300" />
-          <h3 className="text-lg font-semibold text-slate-900">No jobs found</h3>
-          <p className="mt-2 text-sm text-slate-500">Try adjusting your search or filters.</p>
-        </div>
+      {loading ? (
+        <StatStrip
+          items={[
+            { label: 'Loading', value: '…', note: 'Fetching current jobs' },
+            { label: 'Board', value: '…', note: 'Refreshing employers' },
+            { label: 'Filter', value: '…', note: 'Preparing results' },
+            { label: 'Preview', value: '…', note: 'Please wait' },
+          ]}
+        />
+      ) : filteredJobs.length === 0 ? (
+        <EmptyState
+          icon={Briefcase}
+          title="No jobs found"
+          body="Try adjusting your search or filters to see more local opportunities."
+        />
       ) : (
         <div className="grid gap-4 sm:gap-5">
           {filteredJobs.map((job) => (
             <article
               key={job.id}
-              className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm sm:p-6"
+              className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6"
             >
               <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div className="min-w-0">
-                  <h2 className="font-serif text-xl font-bold text-slate-900 sm:text-2xl">
+                  <div className="mb-2 inline-flex rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-[11px] font-medium text-slate-300">
+                    {job.industry || 'Local employer'}
+                  </div>
+                  <h2 className="text-2xl font-semibold tracking-tight text-white sm:text-[28px]">
                     {job.title}
                   </h2>
-                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-slate-500">
+                  <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-slate-400">
                     <span className="inline-flex items-center gap-1.5 break-words">
-                      <Building2 className="h-4 w-4 shrink-0" />
+                      <Building2 className="h-4 w-4 shrink-0 text-cyan-300" />
                       {job.company}
                     </span>
                     {job.city && (
                       <span className="inline-flex items-center gap-1.5">
-                        <MapPin className="h-4 w-4 shrink-0" />
+                        <MapPin className="h-4 w-4 shrink-0 text-cyan-300" />
                         {job.city}
                       </span>
                     )}
                     {job.type && (
                       <span className="inline-flex items-center gap-1.5">
-                        <Briefcase className="h-4 w-4 shrink-0" />
+                        <Briefcase className="h-4 w-4 shrink-0 text-cyan-300" />
                         {humanizeJobType(job.type)}
                       </span>
                     )}
-                    {job.posted && (
-                      <span className="inline-flex items-center gap-1.5">
-                        <Clock3 className="h-4 w-4 shrink-0" />
-                        {new Date(job.posted).toLocaleDateString()}
-                      </span>
-                    )}
+                    <span className="inline-flex items-center gap-1.5">
+                      <Clock3 className="h-4 w-4 shrink-0 text-cyan-300" />
+                      {formatPostedDate(job.posted)}
+                    </span>
                   </div>
                 </div>
 
                 {job.pay && (
-                  <div className="self-start rounded-2xl bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
+                  <div className="self-start rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-300">
                     {job.pay}
                   </div>
                 )}
               </div>
 
               <div className="mt-4 flex flex-wrap gap-2">
-                {job.industry && (
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-                    {job.industry}
-                  </span>
-                )}
                 {job.experience_level && (
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                  <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">
                     {job.experience_level}
                   </span>
                 )}
+                <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">
+                  TarboroJobs listing
+                </span>
               </div>
 
               {job.description && (
-                <p className="mt-4 whitespace-pre-line break-words text-sm leading-6 text-slate-600">
+                <p className="mt-4 whitespace-pre-line break-words text-sm leading-6 text-slate-300">
                   {job.description}
                 </p>
               )}
@@ -452,7 +538,7 @@ function JobsPage({ jobs }) {
   )
 }
 
-function BusinessesPage({ setCurrentPage, businesses }) {
+function BusinessesPage({ setCurrentPage, businesses, loading }) {
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
 
@@ -482,15 +568,24 @@ function BusinessesPage({ setCurrentPage, businesses }) {
     <div>
       <SectionHeader
         title="Local Businesses"
-        subtitle="Browse employers and business profiles connected to TarboroJobs."
+        subtitle="Browse employers connected to TarboroJobs and give local businesses a stronger presence online."
         action={
           <button
             onClick={() => setCurrentPage('list-business')}
-            className="w-full rounded-2xl bg-emerald-700 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 md:w-auto md:py-2.5"
+            className="w-full rounded-2xl bg-cyan-400 px-4 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto md:py-2.5"
           >
             Join as Employer
           </button>
         }
+      />
+
+      <StatStrip
+        items={[
+          { label: 'Business profiles', value: loading ? '…' : businesses.length, note: 'Local employers and directories' },
+          { label: 'Hiring now', value: loading ? '…' : businesses.filter((item) => item.hiring).length, note: 'Actively recruiting' },
+          { label: 'Visibility', value: '24/7', note: 'Accessible on phone and desktop' },
+          { label: 'Goal', value: 'Local', note: 'Built for Tarboro first' },
+        ]}
       />
 
       <SearchRow
@@ -503,52 +598,52 @@ function BusinessesPage({ setCurrentPage, businesses }) {
         setType={() => {}}
       />
 
-      {filteredBusinesses.length === 0 ? (
-        <div className="rounded-[28px] border border-slate-200 bg-white p-8 text-center shadow-sm sm:p-10">
-          <Building2 className="mx-auto mb-4 h-10 w-10 text-slate-300" />
-          <h3 className="text-lg font-semibold text-slate-900">No businesses found</h3>
-          <p className="mt-2 text-sm text-slate-500">Try adjusting your search or filters.</p>
-        </div>
+      {loading ? null : filteredBusinesses.length === 0 ? (
+        <EmptyState
+          icon={Building2}
+          title="No businesses found"
+          body="Try adjusting your search or industry filter to see more employers."
+        />
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {filteredBusinesses.map((business) => (
             <article
               key={business.id}
-              className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm sm:p-6"
+              className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <h2 className="font-serif text-xl font-bold text-slate-900 sm:text-2xl">
+                  <h2 className="text-2xl font-semibold tracking-tight text-white">
                     {business.name}
                   </h2>
-                  <p className="mt-1 text-sm text-slate-500">
+                  <p className="mt-1 text-sm text-slate-400">
                     {business.industry || 'Local Business'}
                   </p>
                 </div>
 
                 {business.hiring && (
-                  <span className="shrink-0 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                  <span className="shrink-0 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs font-semibold text-cyan-300">
                     Hiring
                   </span>
                 )}
               </div>
 
-              <div className="mt-4 space-y-2 text-sm text-slate-600">
+              <div className="mt-4 space-y-2 text-sm text-slate-300">
                 {business.city && (
                   <div className="inline-flex items-center gap-2 break-words">
-                    <MapPin className="h-4 w-4 shrink-0 text-slate-400" />
+                    <MapPin className="h-4 w-4 shrink-0 text-cyan-300" />
                     {business.city}
                   </div>
                 )}
                 {business.phone && (
                   <div className="flex items-center gap-2 break-words">
-                    <Phone className="h-4 w-4 shrink-0 text-slate-400" />
+                    <Phone className="h-4 w-4 shrink-0 text-cyan-300" />
                     {business.phone}
                   </div>
                 )}
                 {business.email && (
                   <div className="flex items-center gap-2 break-all">
-                    <Mail className="h-4 w-4 shrink-0 text-slate-400" />
+                    <Mail className="h-4 w-4 shrink-0 text-cyan-300" />
                     {business.email}
                   </div>
                 )}
@@ -557,7 +652,7 @@ function BusinessesPage({ setCurrentPage, businesses }) {
                     href={business.website.startsWith('http') ? business.website : `https://${business.website}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="flex items-center gap-2 break-all text-emerald-700 hover:underline"
+                    className="flex items-center gap-2 break-all text-cyan-300 hover:underline"
                   >
                     <Globe className="h-4 w-4 shrink-0" />
                     Visit website
@@ -566,7 +661,7 @@ function BusinessesPage({ setCurrentPage, businesses }) {
               </div>
 
               {business.description && (
-                <p className="mt-4 break-words text-sm leading-6 text-slate-600">
+                <p className="mt-4 break-words text-sm leading-6 text-slate-400">
                   {business.description}
                 </p>
               )}
@@ -642,11 +737,29 @@ function SubmitResumePage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="mx-auto max-w-4xl">
       <SectionHeader
         title="Submit Your Resume"
-        subtitle="Apply once and let active employers review your profile."
+        subtitle="Apply once, keep it simple, and let active employers review your profile from a cleaner phone-friendly flow."
       />
+
+      <div className="mb-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">What to include</div>
+          <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
+            <li>• Current contact information</li>
+            <li>• Your target job title or work type</li>
+            <li>• Skills employers can scan quickly</li>
+            <li>• A resume PDF if you have one ready</li>
+          </ul>
+        </div>
+        <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Why this is better</div>
+          <p className="mt-4 text-sm leading-6 text-slate-400">
+            The old version felt bulky and dated. This version keeps the same function, but the layout is easier to fill out on a phone and visually matches the rest of the site.
+          </p>
+        </div>
+      </div>
 
       <Card title="Candidate Profile">
         <form className="space-y-5" onSubmit={handleSubmit}>
@@ -730,18 +843,18 @@ function SubmitResumePage() {
               type="file"
               accept=".pdf,application/pdf"
               onChange={(e) => setResumeFile(e.target.files?.[0] || null)}
-              className="file:mr-3 file:rounded-xl file:border-0 file:bg-emerald-700 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white"
+              className="file:mr-3 file:rounded-xl file:border-0 file:bg-cyan-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950"
             />
           </Field>
 
           {message && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
               {message}
             </div>
           )}
 
           {error && (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {error}
             </div>
           )}
@@ -749,7 +862,7 @@ function SubmitResumePage() {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full rounded-2xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+            className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
           >
             {submitting ? 'Submitting...' : 'Submit Resume'}
           </button>
@@ -761,28 +874,37 @@ function SubmitResumePage() {
 
 function ListBusinessPage() {
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="mx-auto max-w-4xl">
       <SectionHeader
         title="Join as an Employer"
-        subtitle="Create your employer account and start posting jobs to the TarboroJobs community."
+        subtitle="Create your employer account, publish jobs, and manage candidates from the new Midnight Civic dashboard."
       />
 
-      <Card title="Employer Access">
-        <div className="space-y-5">
-          <p className="text-sm leading-6 text-slate-600">
-            TarboroJobs employer access is managed through onboarding. Once your employer
-            account is approved, you’ll be able to log in, post jobs, and review candidate
-            resumes.
+      <div className="mb-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-[30px] border border-slate-800 bg-slate-900/90 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Employer access</div>
+          <p className="mt-4 text-sm leading-6 text-slate-300">
+            TarboroJobs employer access is handled through onboarding. Once approved, you can manage your business profile, post jobs, and review resumes in one place.
           </p>
+        </div>
+        <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">What you get</div>
+          <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
+            <li>• Business profile listing</li>
+            <li>• Employer dashboard access</li>
+            <li>• Job posting management</li>
+            <li>• Resume and candidate workflow tools</li>
+          </ul>
+        </div>
+      </div>
 
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="text-sm font-semibold text-slate-900">What you get</div>
-            <ul className="mt-3 space-y-2 text-sm text-slate-600">
-              <li>• Business profile listing</li>
-              <li>• Employer dashboard access</li>
-              <li>• Job posting management</li>
-              <li>• Resume and candidate workflow tools</li>
-            </ul>
+      <Card title="Employer Plan">
+        <div className="space-y-5">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+            <div className="text-sm font-semibold text-white">Built for a cleaner rollout</div>
+            <p className="mt-2 text-sm leading-6 text-slate-400">
+              This page now matches the rest of the site visually so the employer side no longer feels disconnected from the public side.
+            </p>
           </div>
 
           <div className="flex flex-col gap-3 sm:flex-row">
@@ -790,14 +912,14 @@ function ListBusinessPage() {
               href={SQUARE_EMPLOYER_PLAN_URL}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center justify-center rounded-2xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800"
+              className="inline-flex items-center justify-center rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300"
             >
               Start Employer Plan
             </a>
 
             <a
               href="mailto:jobs@tarborojobs.com"
-              className="inline-flex items-center justify-center rounded-2xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:border-slate-400"
+              className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/60 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-slate-600"
             >
               Contact TarboroJobs
             </a>
@@ -1027,6 +1149,17 @@ export default function TarboroJobsHomepage() {
     }
   }
 
+  async function updateEmployerAccount(payload) {
+    const token = getStoredEmployerToken()
+    await apiUpdateEmployerAccount(token, payload)
+    await Promise.all([loadEmployerSession(token), loadBusinesses()])
+  }
+
+  async function updateEmployerPassword(payload) {
+    const token = getStoredEmployerToken()
+    await apiUpdateEmployerPassword(token, payload)
+  }
+
   async function createEmployerJob(payload) {
     const token = getStoredEmployerToken()
     await apiCreateEmployerJob(token, payload)
@@ -1184,9 +1317,13 @@ export default function TarboroJobsHomepage() {
       employerSession={employerSession}
       onLogout={handleLogout}
     >
-      {currentPage === 'jobs' && <JobsPage jobs={jobsLoading ? [] : jobs} />}
+      {currentPage === 'jobs' && <JobsPage jobs={jobs} loading={jobsLoading} />}
       {currentPage === 'businesses' && (
-        <BusinessesPage setCurrentPage={setCurrentPage} businesses={businessesLoading ? [] : businesses} />
+        <BusinessesPage
+          setCurrentPage={setCurrentPage}
+          businesses={businesses}
+          loading={businessesLoading}
+        />
       )}
       {currentPage === 'submit-resume' && <SubmitResumePage />}
       {currentPage === 'list-business' && <ListBusinessPage />}
@@ -1245,6 +1382,8 @@ export default function TarboroJobsHomepage() {
           editingJobId={editingJobId}
           onUpdateJobStatus={updateEmployerJobStatus}
           onSaveCandidateAction={saveCandidateAction}
+          onUpdateEmployerAccount={updateEmployerAccount}
+          onUpdateEmployerPassword={updateEmployerPassword}
           employerStats={employerStats}
           statsLoading={employerStatsLoading}
           Card={Card}
@@ -1253,6 +1392,7 @@ export default function TarboroJobsHomepage() {
           Select={Select}
           Textarea={Textarea}
           SectionHeader={SectionHeader}
+          employerIndustries={employerIndustries}
           employerJobTypes={employerJobTypes}
           employerPayTypes={employerPayTypes}
           employerResumeTypes={employerResumeTypes}

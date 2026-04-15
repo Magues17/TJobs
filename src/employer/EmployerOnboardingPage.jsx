@@ -179,7 +179,7 @@ export default function EmployerOnboardingPage({
           subtitle="This onboarding link is invalid, expired, or already used"
         />
         <Card title="Onboarding Access Required">
-          <div className="flex items-start gap-3 rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
+          <div className="flex items-start gap-3 rounded-3xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-900">
             <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0" />
             <div>
               <div className="font-semibold">Unable to continue</div>
@@ -192,7 +192,7 @@ export default function EmployerOnboardingPage({
           <div className="pt-4">
             <button
               onClick={() => setCurrentPage('list-business')}
-              className="rounded-2xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800"
+              className="rounded-2xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-sm hover:bg-cyan-300"
             >
               Go to Employer Plan
             </button>
@@ -209,7 +209,7 @@ export default function EmployerOnboardingPage({
         subtitle="Finish your business details and create your employer login. Your email address will be your username."
       />
 
-      <div className="mb-6 rounded-3xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+      <div className="mb-6 rounded-3xl border border-cyan-400/20 bg-cyan-400/10 p-4 text-sm text-cyan-300">
         <div className="flex items-start gap-3">
           <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
           <div>
@@ -322,7 +322,7 @@ export default function EmployerOnboardingPage({
             />
           </Field>
 
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-700">
             <span className="font-semibold">Login details:</span> Use your email address as your
             username when signing in later.
           </div>
@@ -359,7 +359,7 @@ export default function EmployerOnboardingPage({
             </Field>
           </div>
 
-          <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+          <div className="rounded-3xl border border-slate-800 bg-slate-950/60 p-4">
             <div className="flex items-start justify-between gap-6">
               <div>
                 <div className="text-lg font-semibold text-slate-900">Currently Hiring?</div>
@@ -372,11 +372,11 @@ export default function EmployerOnboardingPage({
                 type="button"
                 onClick={() => setIsHiring((prev) => !prev)}
                 className={`relative h-8 w-14 rounded-full p-1 transition ${
-                  isHiring ? 'bg-emerald-600' : 'bg-slate-200 hover:bg-slate-300'
+                  isHiring ? 'bg-cyan-400' : 'bg-slate-700 hover:bg-slate-600'
                 }`}
               >
                 <div
-                  className={`h-6 w-6 rounded-full bg-white shadow-sm transition ${
+                  className={`h-6 w-6 rounded-full bg-slate-200 shadow-sm transition ${
                     isHiring ? 'translate-x-6' : 'translate-x-0'
                   }`}
                 />
@@ -385,13 +385,13 @@ export default function EmployerOnboardingPage({
           </div>
 
           {message && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-300">
               {message}
             </div>
           )}
 
           {error && (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+            <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {error}
             </div>
           )}
@@ -400,7 +400,7 @@ export default function EmployerOnboardingPage({
             <button
               type="submit"
               disabled={loading}
-              className="rounded-2xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-2xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-sm hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {loading ? 'Submitting...' : 'Complete Employer Setup'}
             </button>

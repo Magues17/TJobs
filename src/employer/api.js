@@ -81,6 +81,22 @@ export async function loadEmployerSession(tokenOverride) {
   })
 }
 
+export async function updateEmployerAccount(tokenOverride, payload) {
+  return requestJson(`${API_BASE}/employer/account`, {
+    method: 'PATCH',
+    headers: buildAuthHeaders(tokenOverride, true),
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function updateEmployerPassword(tokenOverride, payload) {
+  return requestJson(`${API_BASE}/employer/account/password`, {
+    method: 'PATCH',
+    headers: buildAuthHeaders(tokenOverride, true),
+    body: JSON.stringify(payload),
+  })
+}
+
 export async function loadEmployerJobs(tokenOverride) {
   return requestJson(`${API_BASE}/employer/jobs`, {
     headers: buildAuthHeaders(tokenOverride, false),

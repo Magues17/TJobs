@@ -52,13 +52,13 @@ export default function EmployerForgotPasswordPage({
           </Field>
 
           {message && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
               {message}
             </div>
           )}
 
           {error && (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {error}
             </div>
           )}
@@ -67,7 +67,7 @@ export default function EmployerForgotPasswordPage({
             <button
               type="submit"
               disabled={loading}
-              className="rounded-2xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-2xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-sm hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {loading ? 'Sending...' : 'Send Reset Link'}
             </button>
@@ -75,7 +75,7 @@ export default function EmployerForgotPasswordPage({
             <button
               type="button"
               onClick={() => setCurrentPage('employer-login')}
-              className="text-sm font-medium text-emerald-700 hover:underline"
+              className="text-sm font-medium text-cyan-300 hover:underline"
             >
               Back to login
             </button>

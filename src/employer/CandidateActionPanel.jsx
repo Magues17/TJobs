@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { NotebookPen } from 'lucide-react'
+import { NotebookPen, CalendarClock, CircleAlert } from 'lucide-react'
 
 function humanizeStatus(value) {
   if (!value) return '—'
@@ -18,6 +18,19 @@ function toDatetimeLocalValue(value) {
   return local.toISOString().slice(0, 16)
 }
 
+function Field({ label, children }) {
+  return (
+    <label className="block space-y-2">
+      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</div>
+      {children}
+    </label>
+  )
+}
+
+function inputClassName(extra = '') {
+  return `w-full rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-400 ${extra}`
+}
+
 export default function CandidateActionPanel({
   selectedResume,
   candidateAction,
@@ -25,11 +38,6 @@ export default function CandidateActionPanel({
   actionMessage,
   actionError,
   onSaveAction,
-  Card,
-  Field,
-  Input,
-  Select,
-  Textarea,
   candidateStatuses,
 }) {
   const [status, setStatus] = useState('')
@@ -66,10 +74,22 @@ export default function CandidateActionPanel({
   }
 
   return (
-    <Card title="Candidate Tracking">
-      <form onSubmit={handleSubmit} className="space-y-4">
+    <section className="overflow-hidden rounded-[28px] border border-slate-800 bg-slate-900/85 shadow-[0_18px_60px_rgba(2,6,23,0.32)]">
+      <div className="border-b border-slate-800 px-5 py-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-300">
+            <NotebookPen className="h-5 w-5" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-white">Candidate Tracking</h3>
+            <p className="text-sm text-slate-400">Manage workflow, dates, and private notes for this candidate.</p>
+          </div>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-5 p-5">
         <Field label="Candidate Status">
-          <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className={inputClassName()}>
             <option value="">No Status</option>
             {candidateStatuses
               .filter((value) => value !== '')
@@ -78,81 +98,93 @@ export default function CandidateActionPanel({
                   {humanizeStatus(value)}
                 </option>
               ))}
-          </Select>
+          </select>
         </Field>
 
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Contacted Date">
-            <Input
+            <input
               type="datetime-local"
               value={contactedAt}
               onChange={(e) => setContactedAt(e.target.value)}
+              className={inputClassName()}
             />
           </Field>
 
           <Field label="Interview Date">
-            <Input
+            <input
               type="datetime-local"
               value={interviewAt}
               onChange={(e) => setInterviewAt(e.target.value)}
+              className={inputClassName()}
             />
           </Field>
 
           <Field label="Hired Date">
-            <Input
+            <input
               type="datetime-local"
               value={hiredAt}
               onChange={(e) => setHiredAt(e.target.value)}
+              className={inputClassName()}
             />
           </Field>
 
           <Field label="Rejected Date">
-            <Input
+            <input
               type="datetime-local"
               value={rejectedAt}
               onChange={(e) => setRejectedAt(e.target.value)}
+              className={inputClassName()}
             />
           </Field>
         </div>
 
         <Field label="Next Follow-Up Date">
-          <Input
-            type="datetime-local"
-            value={nextFollowUpAt}
-            onChange={(e) => setNextFollowUpAt(e.target.value)}
-          />
+          <div className="relative">
+            <CalendarClock className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            <input
+              type="datetime-local"
+              value={nextFollowUpAt}
+              onChange={(e) => setNextFollowUpAt(e.target.value)}
+              className={inputClassName('pl-11')}
+            />
+          </div>
         </Field>
 
         <Field label="Private Notes">
-          <Textarea
+          <textarea
             rows={6}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             placeholder="Add private notes about this candidate..."
+            className={inputClassName('min-h-[144px] resize-y')}
           />
         </Field>
 
         {actionMessage && (
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
             {actionMessage}
           </div>
         )}
 
         {actionError && (
-          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
-            {actionError}
+          <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+            <div className="flex items-start gap-2">
+              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{actionError}</span>
+            </div>
           </div>
         )}
 
         <button
           type="submit"
           disabled={actionLoading}
-          className="inline-flex items-center gap-2 rounded-2xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <NotebookPen className="h-4 w-4" />
           {actionLoading ? 'Saving...' : 'Save Candidate Workflow'}
         </button>
       </form>
-    </Card>
+    </section>
   )
 }

@@ -99,7 +99,7 @@ export default function EmployerResetPasswordPage({
           subtitle="Checking your reset link..."
         />
         <Card title="Reset Password">
-          <p className="text-sm text-slate-600">Validating reset link...</p>
+          <p className="text-sm text-slate-400">Validating reset link...</p>
         </Card>
       </div>
     )
@@ -114,14 +114,14 @@ export default function EmployerResetPasswordPage({
         />
         <Card title="Reset Password">
           <div className="space-y-4">
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {tokenError || 'This reset link is invalid or expired.'}
             </div>
 
             <button
               type="button"
               onClick={() => setCurrentPage('employer-forgot-password')}
-              className="rounded-2xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800"
+              className="rounded-2xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-sm hover:bg-cyan-300"
             >
               Request New Reset Link
             </button>
@@ -140,7 +140,7 @@ export default function EmployerResetPasswordPage({
 
       <Card title="Create New Password">
         <form onSubmit={handleSubmit} className="space-y-5">
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
             Resetting password for <span className="font-semibold">{email || 'your account'}</span>
           </div>
 
@@ -167,13 +167,13 @@ export default function EmployerResetPasswordPage({
           </Field>
 
           {message && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
               {message}
             </div>
           )}
 
           {error && (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {error}
             </div>
           )}
@@ -182,7 +182,7 @@ export default function EmployerResetPasswordPage({
             <button
               type="submit"
               disabled={loading}
-              className="rounded-2xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-2xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-sm hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {loading ? 'Saving...' : 'Reset Password'}
             </button>
@@ -190,7 +190,7 @@ export default function EmployerResetPasswordPage({
             <button
               type="button"
               onClick={() => setCurrentPage('employer-login')}
-              className="text-sm font-medium text-emerald-700 hover:underline"
+              className="text-sm font-medium text-cyan-300 hover:underline"
             >
               Back to login
             </button>
