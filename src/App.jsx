@@ -64,15 +64,47 @@ const industries = [
 
 const jobTypes = ['All Types', 'Full Time', 'Part Time', 'Temporary', 'Contract']
 
-function getInitialPage() {
+function getInitialRoute() {
+  const pathname = window.location.pathname || '/'
   const params = new URLSearchParams(window.location.search)
   const page = params.get('page')
   const token = params.get('token')
 
-  if (page === 'employer-onboarding') return 'employer-onboarding'
-  if (page === 'employer-reset-password' && token) return 'employer-reset-password'
+  const jobApplyMatch = pathname.match(/^\/jobs\/(\d+)\/apply\/?$/)
+  if (jobApplyMatch) {
+    return {
+      page: 'job-apply',
+      jobId: Number(jobApplyMatch[1]),
+    }
+  }
 
-  return 'jobs'
+  const jobDetailMatch = pathname.match(/^\/jobs\/(\d+)\/?$/)
+  if (jobDetailMatch) {
+    return {
+      page: 'job-detail',
+      jobId: Number(jobDetailMatch[1]),
+    }
+  }
+
+  if (page === 'employer-onboarding') return { page: 'employer-onboarding', jobId: null }
+  if (page === 'employer-reset-password' && token) {
+    return { page: 'employer-reset-password', jobId: null }
+  }
+
+  return { page: 'jobs', jobId: null }
+}
+
+function buildPublicPath(page, jobId = null) {
+  if (page === 'job-detail' && jobId) return `/jobs/${jobId}`
+  if (page === 'job-apply' && jobId) return `/jobs/${jobId}/apply`
+  return '/'
+}
+
+function formatPostedDate(value) {
+  if (!value) return 'Recently posted'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Recently posted'
+  return date.toLocaleDateString()
 }
 
 function formatPostedDate(value) {
@@ -374,7 +406,18 @@ function EmptyState({ icon: Icon, title, body }) {
   )
 }
 
+<<<<<<< HEAD
 function JobsPage({ jobs, loading }) {
+=======
+function formatExpiryDate(value) {
+  if (!value) return 'Open until filled or manually closed'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Open until filled or manually closed'
+  return date.toLocaleDateString()
+}
+
+function JobsPage({ jobs, loading, onViewJob }) {
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
   const [type, setType] = useState('All Types')
@@ -405,7 +448,11 @@ function JobsPage({ jobs, loading }) {
     <div>
       <SectionHeader
         title="Local Job Board"
+<<<<<<< HEAD
         subtitle="A cleaner phone-first job board for Tarboro, nearby towns, and active local employers."
+=======
+        subtitle="Click into each listing for the full job description, apply flow, and employer-specific application routing."
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
       />
 
       <div className="mb-5 grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
@@ -416,10 +463,17 @@ function JobsPage({ jobs, loading }) {
               Find work close to home
             </div>
             <h2 className="max-w-2xl text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+<<<<<<< HEAD
               Local jobs without the clutter.
             </h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">
               Browse current openings, filter by industry, and keep the experience clean on both desktop and phone.
+=======
+              Browse local jobs, then open the full posting.
+            </h2>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">
+              Each posting now has its own detail page so applicants can review the role first and then apply directly to that exact employer and job.
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
             </p>
           </div>
         </div>
@@ -437,7 +491,11 @@ function JobsPage({ jobs, loading }) {
             </div>
           </div>
           <div className="mt-4 text-sm leading-6 text-slate-400">
+<<<<<<< HEAD
             The goal here is simple: faster scanning, stronger contrast, and better readability on smaller screens.
+=======
+            Listings stay cleaner when each job has one source of truth for the description, expiration window, and apply flow.
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
           </div>
         </div>
       </div>
@@ -473,7 +531,20 @@ function JobsPage({ jobs, loading }) {
           {filteredJobs.map((job) => (
             <article
               key={job.id}
+<<<<<<< HEAD
               className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6"
+=======
+              role="button"
+              tabIndex={0}
+              onClick={() => onViewJob(job.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onViewJob(job.id)
+                }
+              }}
+              className="cursor-pointer rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] transition hover:border-cyan-400/25 sm:p-6"
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
             >
               <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div className="min-w-0">
@@ -521,15 +592,37 @@ function JobsPage({ jobs, loading }) {
                   </span>
                 )}
                 <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">
+<<<<<<< HEAD
                   TarboroJobs listing
+=======
+                  Expires {formatExpiryDate(job.expires_at)}
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                 </span>
               </div>
 
               {job.description && (
+<<<<<<< HEAD
                 <p className="mt-4 whitespace-pre-line break-words text-sm leading-6 text-slate-300">
+=======
+                <p className="mt-4 line-clamp-4 whitespace-pre-line break-words text-sm leading-6 text-slate-300">
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                   {job.description}
                 </p>
               )}
+
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-slate-500">Open the job page to review the full posting and apply.</div>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onViewJob(job.id)
+                  }}
+                  className="rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+                >
+                  View job
+                </button>
+              </div>
             </article>
           ))}
         </div>
@@ -538,6 +631,129 @@ function JobsPage({ jobs, loading }) {
   )
 }
 
+<<<<<<< HEAD
+=======
+function JobDetailPage({ job, loading, error, onBack, onApply }) {
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-5xl">
+        <SectionHeader title="Job Details" subtitle="Loading the full job posting..." />
+        <Card title="Please wait">
+          <p className="text-sm text-slate-400">Fetching the latest posting details.</p>
+        </Card>
+      </div>
+    )
+  }
+
+  if (error || !job) {
+    return (
+      <div className="mx-auto max-w-5xl">
+        <SectionHeader title="Job Details" subtitle="This job could not be loaded." />
+        <Card title="Job unavailable">
+          <div className="space-y-4">
+            <p className="text-sm leading-6 text-slate-400">{error || 'This posting may have expired or been removed.'}</p>
+            <button
+              type="button"
+              onClick={onBack}
+              className="rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+            >
+              Back to jobs
+            </button>
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mx-auto max-w-5xl">
+      <div className="mb-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-600"
+        >
+          Back to jobs
+        </button>
+      </div>
+
+      <SectionHeader
+        title={job.title}
+        subtitle={`${job.company} • ${job.city || 'Tarboro area'}${job.type ? ` • ${humanizeJobType(job.type)}` : ''}`}
+        action={
+          <button
+            type="button"
+            onClick={onApply}
+            className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
+          >
+            Apply for this job
+          </button>
+        }
+      />
+
+      <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
+        <div className="space-y-5">
+          <Card title="Job Description">
+            <div className="space-y-4 text-sm leading-7 text-slate-300">
+              <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+                <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1">Posted {formatPostedDate(job.posted)}</span>
+                <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1">Expires {formatExpiryDate(job.expires_at)}</span>
+                {job.industry ? <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1">{job.industry}</span> : null}
+                {job.experience_level ? <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1">{job.experience_level}</span> : null}
+              </div>
+              <p className="whitespace-pre-line break-words text-sm leading-7 text-slate-300">{job.description}</p>
+            </div>
+          </Card>
+        </div>
+
+        <div className="space-y-5">
+          <Card title="At a glance">
+            <div className="space-y-3 text-sm text-slate-300">
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Company</div>
+                <div className="mt-1 font-medium text-white">{job.company}</div>
+              </div>
+              {job.city ? (
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Location</div>
+                  <div className="mt-1 font-medium text-white">{job.city}</div>
+                </div>
+              ) : null}
+              {job.pay ? (
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Pay</div>
+                  <div className="mt-1 font-medium text-white">{job.pay}</div>
+                </div>
+              ) : null}
+              {job.type ? (
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Employment Type</div>
+                  <div className="mt-1 font-medium text-white">{humanizeJobType(job.type)}</div>
+                </div>
+              ) : null}
+            </div>
+          </Card>
+
+          <Card title="Apply through TarboroJobs">
+            <div className="space-y-3 text-sm leading-6 text-slate-400">
+              <p>Your application is tied to this exact job and routed only to the employer that owns this posting.</p>
+              <p>PDF resumes only. The system also runs a simple ATS-style comparison so the employer can see how closely the resume matches the posting.</p>
+              <button
+                type="button"
+                onClick={onApply}
+                className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+              >
+                Continue to application
+              </button>
+            </div>
+          </Card>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
 function BusinessesPage({ setCurrentPage, businesses, loading }) {
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
@@ -673,21 +889,29 @@ function BusinessesPage({ setCurrentPage, businesses, loading }) {
   )
 }
 
-function SubmitResumePage() {
+function SubmitResumePage({ job, loading, error, onBack }) {
   const [form, setForm] = useState({
     full_name: '',
     email: '',
     phone: '',
     city: '',
-    desired_job_title: '',
-    employment_type: '',
+    desired_job_title: job?.title || '',
+    employment_type: job?.type || '',
     skills: '',
     resume_text: '',
   })
   const [resumeFile, setResumeFile] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [message, setMessage] = useState('')
-  const [error, setError] = useState('')
+  const [errorMessage, setErrorMessage] = useState('')
+
+  useEffect(() => {
+    setForm((prev) => ({
+      ...prev,
+      desired_job_title: prev.desired_job_title || job?.title || '',
+      employment_type: prev.employment_type || job?.type || '',
+    }))
+  }, [job])
 
   function updateField(key, value) {
     setForm((prev) => ({ ...prev, [key]: value }))
@@ -695,18 +919,25 @@ function SubmitResumePage() {
 
   async function handleSubmit(event) {
     event.preventDefault()
+
+    if (!job?.id) {
+      setErrorMessage('Please start from a live job posting before applying.')
+      return
+    }
+
     setSubmitting(true)
     setMessage('')
-    setError('')
+    setErrorMessage('')
 
     try {
       const payload = new FormData()
       Object.entries(form).forEach(([key, value]) => payload.append(key, value))
+
       if (resumeFile) {
         payload.append('resume_file', resumeFile)
       }
 
-      const response = await fetch(`${API_BASE}/jobseekers`, {
+      const response = await fetch(`${API_BASE}/jobposts/${job.id}/apply`, {
         method: 'POST',
         body: payload,
       })
@@ -714,37 +945,85 @@ function SubmitResumePage() {
       const data = await response.json()
 
       if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Failed to submit resume.')
+        throw new Error(data.error || 'Failed to submit application.')
       }
 
-      setMessage('Your resume has been submitted successfully.')
+      setMessage(`Your application for ${job.title} has been submitted successfully.`)
       setForm({
         full_name: '',
         email: '',
         phone: '',
         city: '',
-        desired_job_title: '',
-        employment_type: '',
+        desired_job_title: job.title || '',
+        employment_type: job.type || '',
         skills: '',
         resume_text: '',
       })
       setResumeFile(null)
     } catch (submitError) {
-      setError(submitError.message || 'Failed to submit resume.')
+      setErrorMessage(submitError.message || 'Failed to submit application.')
     } finally {
       setSubmitting(false)
     }
   }
 
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-4xl">
+        <SectionHeader title="Apply for this job" subtitle="Loading the job before we send your application..." />
+        <Card title="Please wait">
+          <p className="text-sm text-slate-400">Fetching the latest job details.</p>
+        </Card>
+      </div>
+    )
+  }
+
+  if (error || !job) {
+    return (
+      <div className="mx-auto max-w-4xl">
+        <SectionHeader title="Apply for this job" subtitle="This posting is unavailable." />
+        <Card title="Application unavailable">
+          <div className="space-y-4">
+            <p className="text-sm leading-6 text-slate-400">{error || 'This job may have expired or been removed.'}</p>
+            <button
+              type="button"
+              onClick={onBack}
+              className="rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+            >
+              Back to job page
+            </button>
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="mx-auto max-w-4xl">
+<<<<<<< HEAD
       <SectionHeader
         title="Submit Your Resume"
         subtitle="Apply once, keep it simple, and let active employers review your profile from a cleaner phone-friendly flow."
+=======
+      <div className="mb-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-600"
+        >
+          Back to job page
+        </button>
+      </div>
+
+      <SectionHeader
+        title={`Apply for ${job.title}`}
+        subtitle={`${job.company} • ${job.city || 'Tarboro area'}`}
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
       />
 
       <div className="mb-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
         <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+<<<<<<< HEAD
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">What to include</div>
           <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
             <li>• Current contact information</li>
@@ -762,6 +1041,28 @@ function SubmitResumePage() {
       </div>
 
       <Card title="Candidate Profile">
+=======
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">What to know</div>
+          <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
+            <li>• Your application is tied to this exact job ID</li>
+            <li>• Only the employer who posted this job can review it</li>
+            <li>• PDF resumes only for the first ATS pass</li>
+            <li>• The ATS result is a helper, not an automatic rejection</li>
+          </ul>
+        </div>
+        <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Job snapshot</div>
+          <div className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
+            <p><span className="font-semibold text-white">Company:</span> {job.company}</p>
+            {job.pay ? <p><span className="font-semibold text-white">Pay:</span> {job.pay}</p> : null}
+            {job.type ? <p><span className="font-semibold text-white">Type:</span> {humanizeJobType(job.type)}</p> : null}
+            <p className="text-slate-400">Posted {formatPostedDate(job.posted)} • Expires {formatExpiryDate(job.expires_at)}</p>
+          </div>
+        </div>
+      </div>
+
+      <Card title="Application Form">
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
         <form className="space-y-5" onSubmit={handleSubmit}>
           <div className="grid gap-5 md:grid-cols-2">
             <Field label="Full Name" required>
@@ -801,7 +1102,7 @@ function SubmitResumePage() {
               <Input
                 value={form.desired_job_title}
                 onChange={(e) => updateField('desired_job_title', e.target.value)}
-                placeholder="Production Supervisor"
+                placeholder={job.title}
               />
             </Field>
 
@@ -825,20 +1126,20 @@ function SubmitResumePage() {
               rows={4}
               value={form.skills}
               onChange={(e) => updateField('skills', e.target.value)}
-              placeholder="Forklift, scheduling, customer service, welding..."
+              placeholder="Networking, help desk, project management, customer support..."
             />
           </Field>
 
-          <Field label="Resume Summary">
+          <Field label="Optional Resume Highlights">
             <Textarea
-              rows={6}
+              rows={5}
               value={form.resume_text}
               onChange={(e) => updateField('resume_text', e.target.value)}
-              placeholder="Tell employers about your experience, work history, and strengths..."
+              placeholder="You can add a few highlights here in case your PDF formatting is hard to parse."
             />
           </Field>
 
-          <Field label="Resume PDF">
+          <Field label="Resume PDF" required>
             <Input
               type="file"
               accept=".pdf,application/pdf"
@@ -853,9 +1154,15 @@ function SubmitResumePage() {
             </div>
           )}
 
+<<<<<<< HEAD
           {error && (
             <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {error}
+=======
+          {errorMessage && (
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+              {errorMessage}
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
             </div>
           )}
 
@@ -864,7 +1171,7 @@ function SubmitResumePage() {
             disabled={submitting}
             className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
           >
-            {submitting ? 'Submitting...' : 'Submit Resume'}
+            {submitting ? 'Submitting...' : 'Submit Application'}
           </button>
         </form>
       </Card>
@@ -931,11 +1238,16 @@ function ListBusinessPage() {
 }
 
 export default function TarboroJobsHomepage() {
-  const [currentPage, setCurrentPage] = useState(getInitialPage())
+  const initialRoute = getInitialRoute()
+  const [currentPage, setCurrentPage] = useState(initialRoute.page)
+  const [selectedPublicJobId, setSelectedPublicJobId] = useState(initialRoute.jobId)
   const [jobs, setJobs] = useState([])
   const [businesses, setBusinesses] = useState([])
   const [jobsLoading, setJobsLoading] = useState(true)
   const [businessesLoading, setBusinessesLoading] = useState(true)
+  const [publicJobDetail, setPublicJobDetail] = useState(null)
+  const [publicJobLoading, setPublicJobLoading] = useState(false)
+  const [publicJobError, setPublicJobError] = useState('')
   const [employerSession, setEmployerSession] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [employerJobs, setEmployerJobs] = useState([])
@@ -976,6 +1288,71 @@ export default function TarboroJobsHomepage() {
   const [candidateActionLoading, setCandidateActionLoading] = useState(false)
   const [candidateActionMessage, setCandidateActionMessage] = useState('')
   const [candidateActionError, setCandidateActionError] = useState('')
+
+  function setBrowserLocation(page, jobId = null, options = {}) {
+    if (!['jobs', 'job-detail', 'job-apply'].includes(page)) return
+
+    const nextPath = buildPublicPath(page, jobId)
+    const currentPath = `${window.location.pathname}${window.location.search}`
+    if (currentPath === nextPath) return
+
+    const method = options.replace ? 'replaceState' : 'pushState'
+    window.history[method]({}, '', nextPath)
+  }
+
+  function navigateToPage(page, jobId = null, options = {}) {
+    setCurrentPage(page)
+    setSelectedPublicJobId(jobId)
+    setPublicJobError('')
+
+    if (page === 'jobs') {
+      setPublicJobDetail(null)
+      setBrowserLocation('jobs', null, options)
+      return
+    }
+
+    if (page === 'job-detail' || page === 'job-apply') {
+      setBrowserLocation(page, jobId, options)
+    }
+  }
+
+  function handleShellPageChange(page) {
+    if (page === 'jobs') {
+      navigateToPage('jobs', null)
+      return
+    }
+
+    setCurrentPage(page)
+    setSelectedPublicJobId(null)
+    setPublicJobDetail(null)
+    setPublicJobError('')
+    window.history.pushState({}, '', '/')
+  }
+
+  async function loadPublicJobDetail(jobId) {
+    if (!jobId) {
+      setPublicJobDetail(null)
+      return
+    }
+
+    try {
+      setPublicJobLoading(true)
+      setPublicJobError('')
+      const response = await fetch(`${API_BASE}/jobposts/${jobId}`)
+      const data = await response.json()
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to load job details.')
+      }
+
+      setPublicJobDetail(data.job || null)
+    } catch (error) {
+      setPublicJobDetail(null)
+      setPublicJobError(error.message || 'Failed to load job details.')
+    } finally {
+      setPublicJobLoading(false)
+    }
+  }
 
   async function loadBusinesses() {
     try {
@@ -1295,7 +1672,7 @@ export default function TarboroJobsHomepage() {
       interviews_scheduled: 0,
       follow_ups_due: 0,
     })
-    setCurrentPage('jobs')
+    navigateToPage('jobs', null, { replace: true })
   }
 
   useEffect(() => {
@@ -1303,6 +1680,26 @@ export default function TarboroJobsHomepage() {
     loadJobs()
     loadEmployerSession()
   }, [])
+
+  useEffect(() => {
+    function handlePopState() {
+      const route = getInitialRoute()
+      setCurrentPage(route.page)
+      setSelectedPublicJobId(route.jobId)
+      setPublicJobError('')
+    }
+
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  useEffect(() => {
+    if (!selectedPublicJobId || !['job-detail', 'job-apply'].includes(currentPage)) {
+      return
+    }
+
+    loadPublicJobDetail(selectedPublicJobId)
+  }, [currentPage, selectedPublicJobId])
 
   useEffect(() => {
     if (!authLoading && currentPage === 'employer-dashboard' && !employerSession) {
@@ -1313,10 +1710,11 @@ export default function TarboroJobsHomepage() {
   return (
     <Shell
       currentPage={currentPage}
-      setCurrentPage={setCurrentPage}
+      setCurrentPage={handleShellPageChange}
       employerSession={employerSession}
       onLogout={handleLogout}
     >
+<<<<<<< HEAD
       {currentPage === 'jobs' && <JobsPage jobs={jobs} loading={jobsLoading} />}
       {currentPage === 'businesses' && (
         <BusinessesPage
@@ -1324,8 +1722,43 @@ export default function TarboroJobsHomepage() {
           businesses={businesses}
           loading={businessesLoading}
         />
+=======
+      {currentPage === 'jobs' && (
+        <JobsPage jobs={jobs} loading={jobsLoading} onViewJob={(jobId) => navigateToPage('job-detail', jobId)} />
       )}
-      {currentPage === 'submit-resume' && <SubmitResumePage />}
+      {currentPage === 'job-detail' && (
+        <JobDetailPage
+          job={publicJobDetail}
+          loading={publicJobLoading}
+          error={publicJobError}
+          onBack={() => navigateToPage('jobs', null)}
+          onApply={() => navigateToPage('job-apply', selectedPublicJobId)}
+        />
+      )}
+      {currentPage === 'businesses' && (
+        <BusinessesPage
+          setCurrentPage={handleShellPageChange}
+          businesses={businesses}
+          loading={businessesLoading}
+        />
+      )}
+      {currentPage === 'submit-resume' && (
+        <SubmitResumePage
+          job={publicJobDetail}
+          loading={publicJobLoading}
+          error={publicJobError}
+          onBack={() => navigateToPage(selectedPublicJobId ? 'job-detail' : 'jobs', selectedPublicJobId || null)}
+        />
+      )}
+      {currentPage === 'job-apply' && (
+        <SubmitResumePage
+          job={publicJobDetail}
+          loading={publicJobLoading}
+          error={publicJobError}
+          onBack={() => navigateToPage('job-detail', selectedPublicJobId)}
+        />
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
+      )}
       {currentPage === 'list-business' && <ListBusinessPage />}
       {currentPage === 'employer-login' && (
         <EmployerLoginPage

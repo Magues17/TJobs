@@ -19,6 +19,7 @@ const __dirname = path.dirname(__filename)
 const app = express()
 
 const PORT = Number(process.env.PORT || 3000)
+const JOB_POST_EXPIRATION_DAYS = 14
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-change-this'
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || process.env.ADMIN_BEARER_TOKEN || ''
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || ''
@@ -33,6 +34,7 @@ const EMPLOYER_ONBOARDING_BASE_URL =
 const EMPLOYER_PASSWORD_RESET_BASE_URL =
   process.env.EMPLOYER_PASSWORD_RESET_BASE_URL ||
   APP_BASE_URL
+const DB_NAME = process.env.DB_NAME || ''
 
 const projectRoot = path.resolve(__dirname, '..')
 const frontendDistDir = path.join(projectRoot, 'dist')
@@ -50,9 +52,38 @@ const ALLOWED_CANDIDATE_STATUSES = new Set([
   'rejected',
 ])
 
-const ALLOWED_JOB_STATUSES = new Set(['draft', 'open', 'closed', 'filled'])
+const ALLOWED_JOB_STATUSES = new Set(['draft', 'open', 'closed', 'filled', 'expired'])
 const ALLOWED_PAY_TYPES = new Set(['hourly', 'salary', 'daily', 'weekly', 'monthly'])
 const ALLOWED_EMPLOYMENT_TYPES = new Set(['full-time', 'part-time', 'temporary', 'contract'])
+
+const BLOCKED_JOB_POSTING_PATTERNS = [
+  { label: 'men only / male only', regex: /\b(?:men|male)s?\s+only\b/i },
+  { label: 'women only / female only', regex: /\b(?:women|female)s?\s+only\b/i },
+  { label: 'young candidate language', regex: /\byoung\s+(?:man|woman|person|people|candidate|applicant|worker|professional)\b/i },
+  { label: 'age limit language', regex: /\b(?:must\s+be\s+under|under)\s+\d{2}\b/i },
+  { label: 'U.S. citizens only', regex: /\bu\.?s\.?\s+citizens?\s+only\b/i },
+  { label: 'citizens only', regex: /\bcitizens?\s+only\b/i },
+  { label: 'green card only', regex: /\bgreen\s+card\s+only\b/i },
+  { label: 'H-1B only', regex: /\bh-?1b\s+only\b/i },
+  { label: 'native English only', regex: /\bnative\s+english\s+(?:speaker|speakers)\s+only\b/i },
+  { label: 'pregnancy exclusion', regex: /\bno\s+pregnant\s+(?:applicants|people|women)\b/i },
+  { label: 'disability exclusion', regex: /\b(?:no\s+disabled\s+applicants|able-bodied\s+only)\b/i },
+  { label: 'religion-only hiring language', regex: /\b(?:christian|muslim|jewish|hindu)\s+only\b/i },
+  { label: 'applicant fee language', regex: /\b(?:application|training|starter\s+kit|equipment)\s+fee\b/i },
+  { label: 'bank account request', regex: /\bbank\s+account\b/i },
+  { label: 'social security number request', regex: /\b(?:social\s+security\s+number|ssn)\b/i },
+  { label: 'Telegram recruiting', regex: /\btelegram\b/i },
+  { label: 'WhatsApp recruiting', regex: /\bwhatsapp\b/i },
+  { label: 'crypto payment language', regex: /\b(?:crypto|bitcoin|usdt)\b/i },
+]
+const ATS_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from', 'has', 'have',
+  'in', 'into', 'is', 'it', 'its', 'of', 'on', 'or', 'our', 'that', 'the', 'their',
+  'this', 'to', 'we', 'will', 'with', 'you', 'your', 'years', 'year', 'plus', 'using',
+  'use', 'used', 'ability', 'able', 'preferred', 'required', 'requirements', 'responsibilities',
+  'experience', 'including', 'within', 'across', 'through', 'about', 'other', 'must', 'can', 'may'
+])
+
 
 ensureDir(uploadsRoot)
 ensureDir(resumesDir)
@@ -186,6 +217,236 @@ function addDays(days) {
   const d = new Date()
   d.setDate(d.getDate() + days)
   return d
+}
+
+function addDaysToDate(dateValue, days) {
+  const base = dateValue ? new Date(dateValue) : new Date()
+  if (Number.isNaN(base.getTime())) {
+    const fallback = new Date()
+    fallback.setDate(fallback.getDate() + days)
+    return fallback
+  }
+  base.setDate(base.getDate() + days)
+  return base
+}
+
+function parseDateValue(value) {
+  if (!value) return null
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function getBlockedJobPostingTerms(values = []) {
+  const combined = values
+    .filter((value) => value !== undefined && value !== null)
+    .map((value) => String(value))
+    .join('\n')
+
+  if (!combined) return []
+
+  const matches = []
+
+  BLOCKED_JOB_POSTING_PATTERNS.forEach((pattern) => {
+    if (pattern.regex.test(combined)) {
+      matches.push(pattern.label)
+    }
+  })
+
+  return [...new Set(matches)]
+}
+
+function resolveJobLifecycleFields(requestedStatus, existingJob = null) {
+  const now = new Date()
+  let status = requestedStatus || 'open'
+  let publishedAt = parseDateValue(existingJob?.published_at)
+  let expiresAt = parseDateValue(existingJob?.expires_at)
+  let expiredAt = parseDateValue(existingJob?.expired_at)
+
+  if (status === 'open') {
+    const existingExpiry = parseDateValue(existingJob?.expires_at)
+    const needsFreshWindow =
+      !existingJob ||
+      existingJob.status !== 'open' ||
+      !existingExpiry ||
+      existingExpiry.getTime() <= now.getTime()
+
+    if (needsFreshWindow) {
+      publishedAt = now
+      expiresAt = addDaysToDate(now, JOB_POST_EXPIRATION_DAYS)
+    }
+
+    expiredAt = null
+  } else if (status === 'draft') {
+    publishedAt = null
+    expiresAt = null
+    expiredAt = null
+  } else if (status === 'expired') {
+    if (!publishedAt) publishedAt = existingJob?.created_at ? parseDateValue(existingJob.created_at) : now
+    if (!expiresAt) expiresAt = now
+    expiredAt = now
+  } else {
+    expiredAt = null
+  }
+
+  return {
+    status,
+    publishedAt,
+    expiresAt,
+    expiredAt,
+  }
+}
+
+
+function tokenizeAtsText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9+#./\s-]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+    .filter((token) => !ATS_STOP_WORDS.has(token))
+}
+
+function buildRankedKeywordList(values, limit = 16) {
+  const counts = new Map()
+
+  values
+    .filter(Boolean)
+    .flatMap((value) => tokenizeAtsText(value))
+    .forEach((token) => {
+      counts.set(token, (counts.get(token) || 0) + 1)
+    })
+
+  return [...counts.entries()]
+    .sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1]
+      return a[0].localeCompare(b[0])
+    })
+    .map(([token]) => token)
+    .slice(0, limit)
+}
+
+function buildAtsAssessment(job, application) {
+  const titleKeywords = buildRankedKeywordList([job.job_title], 6)
+  const jobKeywords = buildRankedKeywordList(
+    [job.job_title, job.job_description, job.experience_level, job.city, job.employment_type],
+    14
+  )
+
+  const combinedApplicantText = [
+    application.desired_job_title,
+    application.skills,
+    application.resume_text,
+    application.resume_pdf_text,
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  const applicantTokenSet = new Set(tokenizeAtsText(combinedApplicantText))
+  const matchedTitleKeywords = titleKeywords.filter((token) => applicantTokenSet.has(token))
+  const matchedKeywords = jobKeywords.filter((token) => applicantTokenSet.has(token))
+  const missingKeywords = jobKeywords.filter((token) => !applicantTokenSet.has(token))
+
+  const titleCoverage = titleKeywords.length ? matchedTitleKeywords.length / titleKeywords.length : 0
+  const keywordCoverage = jobKeywords.length ? matchedKeywords.length / jobKeywords.length : 0
+  const employmentTypeMatches =
+    !job.employment_type ||
+    !application.employment_type ||
+    application.employment_type === 'any' ||
+    application.employment_type === job.employment_type
+
+  let score = Math.round(keywordCoverage * 65 + titleCoverage * 25 + (employmentTypeMatches ? 10 : 0))
+
+  if (!combinedApplicantText.trim()) {
+    score = 0
+  }
+
+  let recommendation = 'needs_review'
+
+  if (score >= 70) {
+    recommendation = 'strong_match'
+  } else if (score >= 45) {
+    recommendation = 'possible_match'
+  } else if (score > 0) {
+    recommendation = 'low_match'
+  }
+
+  const summaryParts = []
+
+  if (matchedKeywords.length > 0) {
+    summaryParts.push(`Matched keywords: ${matchedKeywords.slice(0, 6).join(', ')}`)
+  }
+
+  if (missingKeywords.length > 0) {
+    summaryParts.push(`Missing signals: ${missingKeywords.slice(0, 6).join(', ')}`)
+  }
+
+  if (matchedTitleKeywords.length > 0) {
+    summaryParts.push('The resume language overlaps with the job title.')
+  }
+
+  if (!summaryParts.length) {
+    summaryParts.push('Not enough overlap was found between the posting and the submitted resume text.')
+  }
+
+  return {
+    score,
+    recommendation,
+    summary: summaryParts.join(' '),
+    matched_keywords: matchedKeywords,
+    missing_keywords: missingKeywords.slice(0, 8),
+    title_match: matchedTitleKeywords.length > 0,
+  }
+}
+
+async function extractPdfTextFromFile(filePath) {
+  if (!filePath) return ''
+
+  try {
+    const pdfParseModule = await import('pdf-parse')
+    const pdfParse = pdfParseModule.default || pdfParseModule
+    const fileBuffer = await fs.promises.readFile(filePath)
+    const parsed = await pdfParse(fileBuffer)
+    return safeTrim(parsed?.text || '', 50000)
+  } catch (error) {
+    console.warn('PDF text extraction unavailable or failed:', error?.message || error)
+    return ''
+  }
+}
+
+async function findPublicJobPostById(jobId) {
+  const [rows] = await pool.query(
+    `
+    SELECT
+      jp.id,
+      jp.employer_id,
+      jp.job_title,
+      jp.job_description,
+      jp.city,
+      jp.pay_min,
+      jp.pay_max,
+      jp.pay_type,
+      jp.employment_type,
+      jp.experience_level,
+      jp.status,
+      jp.created_at,
+      jp.published_at,
+      jp.expires_at,
+      e.business_name,
+      e.industry
+    FROM job_posts jp
+    INNER JOIN employers e ON e.id = jp.employer_id
+    WHERE jp.id = ?
+      AND jp.status = 'open'
+      AND (jp.expires_at IS NULL OR jp.expires_at > CURRENT_TIMESTAMP)
+      AND e.access_status = 'active'
+      AND e.onboarding_completed = 1
+    LIMIT 1
+    `,
+    [jobId]
+  )
+
+  return rows.length ? rows[0] : null
 }
 
 function createAuthToken(user) {
@@ -355,6 +616,130 @@ async function ensureEmployerPasswordResetTable() {
       KEY idx_employer_password_reset_expires (expires_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
+}
+
+async function jobPostsColumnExists(columnName) {
+  const [rows] = await pool.query(
+    `
+    SELECT 1
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = COALESCE(NULLIF(?, ''), DATABASE())
+      AND TABLE_NAME = 'job_posts'
+      AND COLUMN_NAME = ?
+    LIMIT 1
+    `,
+    [DB_NAME, columnName]
+  )
+
+  return rows.length > 0
+}
+
+async function ensureJobPostingComplianceColumns() {
+  const columns = [
+    {
+      name: 'published_at',
+      sql: 'ADD COLUMN published_at DATETIME NULL DEFAULT NULL AFTER status',
+    },
+    {
+      name: 'expires_at',
+      sql: 'ADD COLUMN expires_at DATETIME NULL DEFAULT NULL AFTER published_at',
+    },
+    {
+      name: 'expired_at',
+      sql: 'ADD COLUMN expired_at DATETIME NULL DEFAULT NULL AFTER expires_at',
+    },
+    {
+      name: 'posting_guidelines_accepted',
+      sql: 'ADD COLUMN posting_guidelines_accepted TINYINT(1) NOT NULL DEFAULT 0 AFTER expired_at',
+    },
+    {
+      name: 'posting_guidelines_accepted_at',
+      sql: 'ADD COLUMN posting_guidelines_accepted_at DATETIME NULL DEFAULT NULL AFTER posting_guidelines_accepted',
+    },
+  ]
+
+  for (const column of columns) {
+    const exists = await jobPostsColumnExists(column.name)
+    if (!exists) {
+      await pool.query(`ALTER TABLE job_posts ${column.sql}`)
+    }
+  }
+}
+
+
+async function jobSeekersColumnExists(columnName) {
+  const [rows] = await pool.query(
+    `
+    SELECT 1
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = COALESCE(NULLIF(?, ''), DATABASE())
+      AND TABLE_NAME = 'job_seekers'
+      AND COLUMN_NAME = ?
+    LIMIT 1
+    `,
+    [DB_NAME, columnName]
+  )
+
+  return rows.length > 0
+}
+
+async function ensureJobSeekerApplicationColumns() {
+  const columns = [
+    {
+      name: 'employer_id',
+      sql: 'ADD COLUMN employer_id BIGINT UNSIGNED NULL DEFAULT NULL AFTER resume_file_url',
+    },
+    {
+      name: 'job_post_id',
+      sql: 'ADD COLUMN job_post_id BIGINT UNSIGNED NULL DEFAULT NULL AFTER employer_id',
+    },
+    {
+      name: 'ats_score',
+      sql: 'ADD COLUMN ats_score DECIMAL(5,2) NULL DEFAULT NULL AFTER job_post_id',
+    },
+    {
+      name: 'ats_recommendation',
+      sql: 'ADD COLUMN ats_recommendation VARCHAR(50) NULL DEFAULT NULL AFTER ats_score',
+    },
+    {
+      name: 'ats_summary',
+      sql: 'ADD COLUMN ats_summary TEXT NULL AFTER ats_recommendation',
+    },
+    {
+      name: 'ats_keywords_matched',
+      sql: 'ADD COLUMN ats_keywords_matched TEXT NULL AFTER ats_summary',
+    },
+    {
+      name: 'ats_keywords_missing',
+      sql: 'ADD COLUMN ats_keywords_missing TEXT NULL AFTER ats_keywords_matched',
+    },
+    {
+      name: 'ats_title_match',
+      sql: 'ADD COLUMN ats_title_match TINYINT(1) NOT NULL DEFAULT 0 AFTER ats_keywords_missing',
+    },
+  ]
+
+  for (const column of columns) {
+    const exists = await jobSeekersColumnExists(column.name)
+    if (!exists) {
+      await pool.query(`ALTER TABLE job_seekers ${column.sql}`)
+    }
+  }
+}
+
+async function expireOpenJobs() {
+  await pool.query(
+    `
+    UPDATE job_posts
+    SET
+      status = 'expired',
+      expired_at = COALESCE(expired_at, CURRENT_TIMESTAMP),
+      updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'open'
+      AND expires_at IS NOT NULL
+      AND expires_at <= CURRENT_TIMESTAMP
+    `
+  )
 }
 
 function escapeHtml(value) {
@@ -588,7 +973,16 @@ async function fetchCandidateActionById(id) {
 async function findJobOwnedByEmployer(jobId, employerId) {
   const [rows] = await pool.query(
     `
-    SELECT id, employer_id
+    SELECT
+      id,
+      employer_id,
+      status,
+      created_at,
+      published_at,
+      expires_at,
+      expired_at,
+      posting_guidelines_accepted,
+      posting_guidelines_accepted_at
     FROM job_posts
     WHERE id = ?
     LIMIT 1
@@ -697,6 +1091,190 @@ app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
     res.status(500).json({
       success: false,
       error: error?.message || 'Failed to submit resume.',
+<<<<<<< HEAD
+=======
+    })
+  }
+})
+
+
+app.get('/api/jobposts/:id', async (req, res) => {
+  try {
+    await expireOpenJobs()
+    const jobId = Number(req.params.id)
+
+    if (!jobId) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid job ID is required.',
+      })
+    }
+
+    const row = await findPublicJobPostById(jobId)
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: 'Job not found or no longer accepting applications.',
+      })
+    }
+
+    res.json({
+      success: true,
+      job: {
+        id: row.id,
+        employer_id: row.employer_id,
+        title: row.job_title,
+        company: row.business_name,
+        city: row.city,
+        pay: formatPayDisplay(row.pay_min, row.pay_max, row.pay_type),
+        pay_min: row.pay_min,
+        pay_max: row.pay_max,
+        pay_type: row.pay_type,
+        type: row.employment_type,
+        industry: row.industry,
+        experience_level: row.experience_level,
+        description: row.job_description,
+        status: row.status,
+        posted: row.published_at || row.created_at,
+        expires_at: row.expires_at,
+      },
+    })
+  } catch (error) {
+    console.error('GET /api/jobposts/:id error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to fetch job posting.',
+    })
+  }
+})
+
+app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, res) => {
+  try {
+    await expireOpenJobs()
+    const jobId = Number(req.params.id)
+
+    if (!jobId) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid job ID is required.',
+      })
+    }
+
+    const job = await findPublicJobPostById(jobId)
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: 'This job is no longer accepting applications.',
+      })
+    }
+
+    const fullName = safeTrim(req.body.full_name, 255)
+    const email = normalizeEmail(req.body.email)
+    const phone = toNullableString(req.body.phone, 50)
+    const city = toNullableString(req.body.city, 255)
+    const desiredJobTitle = toNullableString(req.body.desired_job_title, 255) || job.job_title
+    const employmentType = toNullableString(req.body.employment_type, 50) || job.employment_type || 'any'
+    const skills = toNullableString(req.body.skills, 5000)
+    const applicantNote = toNullableString(req.body.resume_text, 10000)
+
+    if (!fullName || !email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Full name and email are required.',
+      })
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid email address is required.',
+      })
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'A PDF resume is required to apply for this job.',
+      })
+    }
+
+    const pdfResumeText = await extractPdfTextFromFile(req.file.path)
+    const combinedResumeText = safeTrim(
+      [applicantNote, pdfResumeText].filter(Boolean).join('\n\n'),
+      50000
+    )
+    const ats = buildAtsAssessment(job, {
+      desired_job_title: desiredJobTitle,
+      employment_type: employmentType,
+      skills,
+      resume_text: applicantNote,
+      resume_pdf_text: pdfResumeText,
+    })
+    const resumeFileUrl = `/uploads/resumes/${req.file.filename}`
+
+    const [result] = await pool.query(
+      `
+      INSERT INTO job_seekers
+      (
+        full_name,
+        email,
+        phone,
+        city,
+        desired_job_title,
+        employment_type,
+        skills,
+        resume_text,
+        resume_file_url,
+        employer_id,
+        job_post_id,
+        ats_score,
+        ats_recommendation,
+        ats_summary,
+        ats_keywords_matched,
+        ats_keywords_missing,
+        ats_title_match
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        fullName,
+        email,
+        phone,
+        city,
+        desiredJobTitle,
+        employmentType,
+        skills,
+        combinedResumeText,
+        resumeFileUrl,
+        job.employer_id,
+        job.id,
+        ats.score,
+        ats.recommendation,
+        ats.summary,
+        ats.matched_keywords.join(', '),
+        ats.missing_keywords.join(', '),
+        ats.title_match ? 1 : 0,
+      ]
+    )
+
+    res.json({
+      success: true,
+      id: result.insertId,
+      resume_file_url: resumeFileUrl,
+      ats: {
+        score: ats.score,
+        recommendation: ats.recommendation,
+      },
+      message: 'Application submitted successfully.',
+    })
+  } catch (error) {
+    console.error('POST /api/jobposts/:id/apply error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to submit application.',
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
     })
   }
 })
@@ -1811,6 +2389,7 @@ app.patch('/api/employer/account/password', requireEmployerAuth, async (req, res
 
 app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, async (req, res) => {
   try {
+    await expireOpenJobs()
     const employerId = req.auth.employer_id
 
     const [rows] = await pool.query(
@@ -1827,16 +2406,22 @@ app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asyn
         experience_level,
         status,
         created_at,
+        published_at,
+        expires_at,
+        expired_at,
+        posting_guidelines_accepted,
+        posting_guidelines_accepted_at,
         updated_at
       FROM job_posts
       WHERE employer_id = ?
-      ORDER BY created_at DESC
+      ORDER BY COALESCE(published_at, created_at) DESC
       `,
       [employerId]
     )
 
     const jobs = rows.map((row) => ({
       ...row,
+      posting_guidelines_accepted: !!row.posting_guidelines_accepted,
       pay_display: formatPayDisplay(row.pay_min, row.pay_max, row.pay_type),
     }))
 
@@ -1855,6 +2440,7 @@ app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asyn
 
 app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, async (req, res) => {
   try {
+    await expireOpenJobs()
     const employerId = req.auth.employer_id
     const jobTitle = safeTrim(req.body.job_title, 255)
     const jobDescription = safeTrim(req.body.job_description, 20000)
@@ -1869,11 +2455,27 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
     )
     const experienceLevel = toNullableString(req.body.experience_level, 255)
     const status = normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, 'open')
+    const complianceCertified = parseBoolean(req.body.compliance_certified)
+    const blockedTerms = getBlockedJobPostingTerms([jobTitle, jobDescription])
 
     if (!jobTitle || !jobDescription) {
       return res.status(400).json({
         success: false,
         error: 'Job title and job description are required.',
+      })
+    }
+
+    if (!complianceCertified) {
+      return res.status(400).json({
+        success: false,
+        error: 'You must certify that the posting follows TarboroJobs job posting guidelines before publishing.',
+      })
+    }
+
+    if (blockedTerms.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `This job post includes language TarboroJobs does not allow: ${blockedTerms.join(', ')}. Please remove it and try again.`,
       })
     }
 
@@ -1883,6 +2485,9 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
         error: 'pay_max cannot be less than pay_min.',
       })
     }
+
+    const lifecycle = resolveJobLifecycleFields(status)
+    const guidelinesAcceptedAt = complianceCertified ? new Date() : null
 
     const [result] = await pool.query(
       `
@@ -1897,9 +2502,14 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
         pay_type,
         employment_type,
         experience_level,
-        status
+        status,
+        published_at,
+        expires_at,
+        expired_at,
+        posting_guidelines_accepted,
+        posting_guidelines_accepted_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         employerId,
@@ -1911,14 +2521,22 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
         payType,
         employmentType,
         experienceLevel,
-        status,
+        lifecycle.status,
+        lifecycle.publishedAt,
+        lifecycle.expiresAt,
+        lifecycle.expiredAt,
+        complianceCertified ? 1 : 0,
+        guidelinesAcceptedAt,
       ]
     )
 
     res.json({
       success: true,
       id: result.insertId,
-      message: 'Job created successfully.',
+      message:
+        lifecycle.status === 'open'
+          ? `Job created successfully. It will expire automatically in ${JOB_POST_EXPIRATION_DAYS} days.`
+          : 'Job created successfully.',
     })
   } catch (error) {
     console.error('POST /api/employer/jobs error:', error)
@@ -1931,6 +2549,7 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
 
 app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer, async (req, res) => {
   try {
+    await expireOpenJobs()
     const employerId = req.auth.employer_id
     const jobId = Number(req.params.id)
 
@@ -1970,11 +2589,27 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
     )
     const experienceLevel = toNullableString(req.body.experience_level, 255)
     const status = normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, 'open')
+    const complianceCertified = parseBoolean(req.body.compliance_certified)
+    const blockedTerms = getBlockedJobPostingTerms([jobTitle, jobDescription])
 
     if (!jobTitle || !jobDescription) {
       return res.status(400).json({
         success: false,
         error: 'Job title and job description are required.',
+      })
+    }
+
+    if (!complianceCertified) {
+      return res.status(400).json({
+        success: false,
+        error: 'You must certify that the posting follows TarboroJobs job posting guidelines before saving.',
+      })
+    }
+
+    if (blockedTerms.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `This job post includes language TarboroJobs does not allow: ${blockedTerms.join(', ')}. Please remove it and try again.`,
       })
     }
 
@@ -1984,6 +2619,9 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
         error: 'pay_max cannot be less than pay_min.',
       })
     }
+
+    const lifecycle = resolveJobLifecycleFields(status, ownedJob)
+    const guidelinesAcceptedAt = complianceCertified ? new Date() : null
 
     await pool.query(
       `
@@ -1998,6 +2636,11 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
         employment_type = ?,
         experience_level = ?,
         status = ?,
+        published_at = ?,
+        expires_at = ?,
+        expired_at = ?,
+        posting_guidelines_accepted = ?,
+        posting_guidelines_accepted_at = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
       `,
@@ -2010,14 +2653,22 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
         payType,
         employmentType,
         experienceLevel,
-        status,
+        lifecycle.status,
+        lifecycle.publishedAt,
+        lifecycle.expiresAt,
+        lifecycle.expiredAt,
+        complianceCertified ? 1 : 0,
+        guidelinesAcceptedAt,
         jobId,
       ]
     )
 
     res.json({
       success: true,
-      message: 'Job updated successfully.',
+      message:
+        lifecycle.status === 'open' && ownedJob.status !== 'open'
+          ? `Job updated successfully and renewed for ${JOB_POST_EXPIRATION_DAYS} days.`
+          : 'Job updated successfully.',
     })
   } catch (error) {
     console.error('PATCH /api/employer/jobs/:id error:', error)
@@ -2034,6 +2685,7 @@ app.patch(
   requireEligibleEmployer,
   async (req, res) => {
     try {
+      await expireOpenJobs()
       const employerId = req.auth.employer_id
       const jobId = Number(req.params.id)
       const status = normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, null)
@@ -2068,18 +2720,35 @@ app.patch(
         })
       }
 
+      if (status === 'open' && !ownedJob.posting_guidelines_accepted) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please edit this job and certify the posting guidelines before reopening it.',
+        })
+      }
+
+      const lifecycle = resolveJobLifecycleFields(status, ownedJob)
+
       await pool.query(
         `
         UPDATE job_posts
-        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        SET
+          status = ?,
+          published_at = ?,
+          expires_at = ?,
+          expired_at = ?,
+          updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         `,
-        [status, jobId]
+        [lifecycle.status, lifecycle.publishedAt, lifecycle.expiresAt, lifecycle.expiredAt, jobId]
       )
 
       res.json({
         success: true,
-        message: 'Job status updated successfully.',
+        message:
+          lifecycle.status === 'open'
+            ? `Job status updated successfully. This listing is now live for ${JOB_POST_EXPIRATION_DAYS} days.`
+            : 'Job status updated successfully.',
       })
     } catch (error) {
       console.error('PATCH /api/employer/jobs/:id/status error:', error)
@@ -2142,6 +2811,7 @@ app.delete('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmploye
 
 app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, async (req, res) => {
   try {
+    await expireOpenJobs()
     const employerId = req.auth.employer_id
     const now = new Date()
 
@@ -2173,6 +2843,10 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
       LEFT JOIN employer_candidate_actions eca
         ON eca.job_seeker_id = js.id
        AND eca.employer_id = ?
+<<<<<<< HEAD
+=======
+      WHERE js.employer_id = ?
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
       `,
       [now, employerId]
     )
@@ -2216,8 +2890,13 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       })
     }
 
+<<<<<<< HEAD
     const whereParts = []
     const params = []
+=======
+    const whereParts = ['js.employer_id = ?']
+    const params = [employerId]
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
 
     if (search) {
       whereParts.push(`
@@ -2257,6 +2936,7 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       LEFT JOIN employer_candidate_actions eca
         ON eca.job_seeker_id = js.id
        AND eca.employer_id = ?
+      LEFT JOIN job_posts jp ON jp.id = js.job_post_id
       ${whereSql}
       `,
       [employerId, ...params]
@@ -2277,8 +2957,16 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
         js.skills,
         js.resume_text,
         js.resume_file_url,
+        js.job_post_id,
+        js.ats_score,
+        js.ats_recommendation,
+        js.ats_summary,
+        js.ats_keywords_matched,
+        js.ats_keywords_missing,
+        js.ats_title_match,
         js.created_at,
         js.updated_at,
+        jp.job_title,
         eca.id AS action_id,
         eca.status AS candidate_status,
         eca.notes AS candidate_notes,
@@ -2292,6 +2980,7 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       LEFT JOIN employer_candidate_actions eca
         ON eca.job_seeker_id = js.id
        AND eca.employer_id = ?
+      LEFT JOIN job_posts jp ON jp.id = js.job_post_id
       ${whereSql}
       ORDER BY js.created_at DESC
       LIMIT ? OFFSET ?
@@ -2310,6 +2999,24 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       skills: row.skills,
       resume_text: row.resume_text,
       resume_file_url: row.resume_file_url,
+      job_post_id: row.job_post_id,
+      job_title: row.job_title,
+      ats_score: row.ats_score !== null && row.ats_score !== undefined ? Number(row.ats_score) : null,
+      ats_recommendation: row.ats_recommendation,
+      ats_summary: row.ats_summary,
+      ats_keywords_matched: row.ats_keywords_matched
+        ? String(row.ats_keywords_matched)
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : [],
+      ats_keywords_missing: row.ats_keywords_missing
+        ? String(row.ats_keywords_missing)
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : [],
+      ats_title_match: !!row.ats_title_match,
       created_at: row.created_at,
       updated_at: row.updated_at,
       candidate_action: row.action_id
@@ -2338,12 +3045,15 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
         has_next: page * limit < total,
         has_prev: page > 1,
       },
+<<<<<<< HEAD
       filters: {
         search,
         city,
         employment_type: employmentType,
         candidate_status: candidateStatus || '',
       },
+=======
+>>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
     })
   } catch (error) {
     console.error('GET /api/employer/resumes error:', error)
@@ -2698,6 +3408,7 @@ app.get('/api/employers', async (req, res) => {
 
 app.get('/api/jobposts', async (req, res) => {
   try {
+    await expireOpenJobs()
     const [rows] = await pool.query(
       `
       SELECT
@@ -2712,14 +3423,17 @@ app.get('/api/jobposts', async (req, res) => {
         jp.experience_level,
         jp.status,
         jp.created_at,
+        jp.published_at,
+        jp.expires_at,
         e.business_name,
         e.industry
       FROM job_posts jp
       INNER JOIN employers e ON e.id = jp.employer_id
       WHERE jp.status = 'open'
+        AND (jp.expires_at IS NULL OR jp.expires_at > CURRENT_TIMESTAMP)
         AND e.access_status = 'active'
         AND e.onboarding_completed = 1
-      ORDER BY jp.created_at DESC
+      ORDER BY COALESCE(jp.published_at, jp.created_at) DESC
       `
     )
 
@@ -2734,7 +3448,8 @@ app.get('/api/jobposts', async (req, res) => {
       experience_level: row.experience_level,
       description: row.job_description,
       status: row.status,
-      posted: row.created_at,
+      posted: row.published_at || row.created_at,
+      expires_at: row.expires_at,
     }))
 
     res.json({
@@ -2907,6 +3622,9 @@ app.use((error, req, res, next) => {
 
 async function startServer() {
   await ensureEmployerPasswordResetTable()
+  await ensureJobPostingComplianceColumns()
+  await ensureJobSeekerApplicationColumns()
+  await expireOpenJobs()
 
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`)
