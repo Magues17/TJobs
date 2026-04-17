@@ -1091,8 +1091,6 @@ app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
     res.status(500).json({
       success: false,
       error: error?.message || 'Failed to submit resume.',
-<<<<<<< HEAD
-=======
     })
   }
 })
@@ -1274,7 +1272,6 @@ app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, re
     res.status(500).json({
       success: false,
       error: error?.message || 'Failed to submit application.',
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
     })
   }
 })
@@ -2843,12 +2840,9 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
       LEFT JOIN employer_candidate_actions eca
         ON eca.job_seeker_id = js.id
        AND eca.employer_id = ?
-<<<<<<< HEAD
-=======
       WHERE js.employer_id = ?
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
       `,
-      [now, employerId]
+      [now, employerId, employerId]
     )
 
     res.json({
@@ -2890,13 +2884,8 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       })
     }
 
-<<<<<<< HEAD
-    const whereParts = []
-    const params = []
-=======
     const whereParts = ['js.employer_id = ?']
     const params = [employerId]
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
 
     if (search) {
       whereParts.push(`
@@ -2906,10 +2895,11 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
           OR js.desired_job_title LIKE ?
           OR js.skills LIKE ?
           OR js.resume_text LIKE ?
+          OR jp.job_title LIKE ?
         )
       `)
       const like = `%${search}%`
-      params.push(like, like, like, like, like)
+      params.push(like, like, like, like, like, like)
     }
 
     if (city) {
@@ -2927,7 +2917,7 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       params.push(candidateStatus)
     }
 
-    const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : ''
+    const whereSql = `WHERE ${whereParts.join(' AND ')}`
 
     const [countRows] = await pool.query(
       `
@@ -3045,15 +3035,6 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
         has_next: page * limit < total,
         has_prev: page > 1,
       },
-<<<<<<< HEAD
-      filters: {
-        search,
-        city,
-        employment_type: employmentType,
-        candidate_status: candidateStatus || '',
-      },
-=======
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
     })
   } catch (error) {
     console.error('GET /api/employer/resumes error:', error)

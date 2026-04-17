@@ -107,13 +107,6 @@ function formatPostedDate(value) {
   return date.toLocaleDateString()
 }
 
-function formatPostedDate(value) {
-  if (!value) return 'Recently posted'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'Recently posted'
-  return date.toLocaleDateString()
-}
-
 function Shell({ currentPage, setCurrentPage, employerSession, onLogout, children }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
@@ -406,9 +399,6 @@ function EmptyState({ icon: Icon, title, body }) {
   )
 }
 
-<<<<<<< HEAD
-function JobsPage({ jobs, loading }) {
-=======
 function formatExpiryDate(value) {
   if (!value) return 'Open until filled or manually closed'
   const date = new Date(value)
@@ -417,7 +407,6 @@ function formatExpiryDate(value) {
 }
 
 function JobsPage({ jobs, loading, onViewJob }) {
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
   const [type, setType] = useState('All Types')
@@ -448,11 +437,7 @@ function JobsPage({ jobs, loading, onViewJob }) {
     <div>
       <SectionHeader
         title="Local Job Board"
-<<<<<<< HEAD
-        subtitle="A cleaner phone-first job board for Tarboro, nearby towns, and active local employers."
-=======
         subtitle="Click into each listing for the full job description, apply flow, and employer-specific application routing."
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
       />
 
       <div className="mb-5 grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
@@ -463,17 +448,10 @@ function JobsPage({ jobs, loading, onViewJob }) {
               Find work close to home
             </div>
             <h2 className="max-w-2xl text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-<<<<<<< HEAD
-              Local jobs without the clutter.
-            </h2>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">
-              Browse current openings, filter by industry, and keep the experience clean on both desktop and phone.
-=======
               Browse local jobs, then open the full posting.
             </h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">
               Each posting now has its own detail page so applicants can review the role first and then apply directly to that exact employer and job.
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
             </p>
           </div>
         </div>
@@ -491,11 +469,7 @@ function JobsPage({ jobs, loading, onViewJob }) {
             </div>
           </div>
           <div className="mt-4 text-sm leading-6 text-slate-400">
-<<<<<<< HEAD
-            The goal here is simple: faster scanning, stronger contrast, and better readability on smaller screens.
-=======
             Listings stay cleaner when each job has one source of truth for the description, expiration window, and apply flow.
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
           </div>
         </div>
       </div>
@@ -531,9 +505,6 @@ function JobsPage({ jobs, loading, onViewJob }) {
           {filteredJobs.map((job) => (
             <article
               key={job.id}
-<<<<<<< HEAD
-              className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6"
-=======
               role="button"
               tabIndex={0}
               onClick={() => onViewJob(job.id)}
@@ -544,7 +515,6 @@ function JobsPage({ jobs, loading, onViewJob }) {
                 }
               }}
               className="cursor-pointer rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] transition hover:border-cyan-400/25 sm:p-6"
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
             >
               <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div className="min-w-0">
@@ -592,20 +562,12 @@ function JobsPage({ jobs, loading, onViewJob }) {
                   </span>
                 )}
                 <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">
-<<<<<<< HEAD
-                  TarboroJobs listing
-=======
                   Expires {formatExpiryDate(job.expires_at)}
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                 </span>
               </div>
 
               {job.description && (
-<<<<<<< HEAD
-                <p className="mt-4 whitespace-pre-line break-words text-sm leading-6 text-slate-300">
-=======
                 <p className="mt-4 line-clamp-4 whitespace-pre-line break-words text-sm leading-6 text-slate-300">
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                   {job.description}
                 </p>
               )}
@@ -631,8 +593,6 @@ function JobsPage({ jobs, loading, onViewJob }) {
   )
 }
 
-<<<<<<< HEAD
-=======
 function JobDetailPage({ job, loading, error, onBack, onApply }) {
   if (loading) {
     return (
@@ -753,7 +713,6 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
   )
 }
 
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
 function BusinessesPage({ setCurrentPage, businesses, loading }) {
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
@@ -1000,11 +959,6 @@ function SubmitResumePage({ job, loading, error, onBack }) {
 
   return (
     <div className="mx-auto max-w-4xl">
-<<<<<<< HEAD
-      <SectionHeader
-        title="Submit Your Resume"
-        subtitle="Apply once, keep it simple, and let active employers review your profile from a cleaner phone-friendly flow."
-=======
       <div className="mb-4">
         <button
           type="button"
@@ -1018,30 +972,10 @@ function SubmitResumePage({ job, loading, error, onBack }) {
       <SectionHeader
         title={`Apply for ${job.title}`}
         subtitle={`${job.company} • ${job.city || 'Tarboro area'}`}
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
       />
 
       <div className="mb-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
         <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
-<<<<<<< HEAD
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">What to include</div>
-          <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
-            <li>• Current contact information</li>
-            <li>• Your target job title or work type</li>
-            <li>• Skills employers can scan quickly</li>
-            <li>• A resume PDF if you have one ready</li>
-          </ul>
-        </div>
-        <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Why this is better</div>
-          <p className="mt-4 text-sm leading-6 text-slate-400">
-            The old version felt bulky and dated. This version keeps the same function, but the layout is easier to fill out on a phone and visually matches the rest of the site.
-          </p>
-        </div>
-      </div>
-
-      <Card title="Candidate Profile">
-=======
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">What to know</div>
           <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
             <li>• Your application is tied to this exact job ID</li>
@@ -1062,7 +996,6 @@ function SubmitResumePage({ job, loading, error, onBack }) {
       </div>
 
       <Card title="Application Form">
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
         <form className="space-y-5" onSubmit={handleSubmit}>
           <div className="grid gap-5 md:grid-cols-2">
             <Field label="Full Name" required>
@@ -1154,15 +1087,9 @@ function SubmitResumePage({ job, loading, error, onBack }) {
             </div>
           )}
 
-<<<<<<< HEAD
-          {error && (
-            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
-              {error}
-=======
           {errorMessage && (
             <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {errorMessage}
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
             </div>
           )}
 
@@ -1714,15 +1641,6 @@ export default function TarboroJobsHomepage() {
       employerSession={employerSession}
       onLogout={handleLogout}
     >
-<<<<<<< HEAD
-      {currentPage === 'jobs' && <JobsPage jobs={jobs} loading={jobsLoading} />}
-      {currentPage === 'businesses' && (
-        <BusinessesPage
-          setCurrentPage={setCurrentPage}
-          businesses={businesses}
-          loading={businessesLoading}
-        />
-=======
       {currentPage === 'jobs' && (
         <JobsPage jobs={jobs} loading={jobsLoading} onViewJob={(jobId) => navigateToPage('job-detail', jobId)} />
       )}
@@ -1757,7 +1675,6 @@ export default function TarboroJobsHomepage() {
           error={publicJobError}
           onBack={() => navigateToPage('job-detail', selectedPublicJobId)}
         />
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
       )}
       {currentPage === 'list-business' && <ListBusinessPage />}
       {currentPage === 'employer-login' && (

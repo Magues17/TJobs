@@ -62,6 +62,3 @@ dist-ssr
 *.env
 *.local
 !.env.example
-
-server/uploads/resumes/*
-!server/uploads/resumes/.gitkeep

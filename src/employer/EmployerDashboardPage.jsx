@@ -61,8 +61,6 @@ function formatShortDate(value) {
   return date.toLocaleDateString()
 }
 
-<<<<<<< HEAD
-=======
 function formatExpirationLabel(job) {
   if (!job?.expires_at) return 'No expiration set'
   const expiresAt = new Date(job.expires_at)
@@ -88,7 +86,6 @@ function atsBadgeClass(value) {
   return 'border-slate-700 bg-slate-900/70 text-slate-300'
 }
 
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
 function panelClassName(extra = '') {
   return `overflow-hidden rounded-[28px] border border-slate-800 bg-slate-900/85 shadow-[0_18px_60px_rgba(2,6,23,0.32)] ${extra}`
 }
@@ -290,22 +287,6 @@ export default function EmployerDashboardPage({
   }, [selectedResume?.id])
 
   function handleAccountFormChange(e) {
-<<<<<<< HEAD
-    const { name, value } = e.target
-    setAccountForm((prev) => ({
-      ...prev,
-      [name]: name === 'is_hiring' ? value === 'true' : value,
-    }))
-  }
-
-  function handlePasswordFormChange(e) {
-    const { name, value } = e.target
-    setPasswordForm((prev) => ({ ...prev, [name]: value }))
-  }
-
-  function handleJobFormChange(e) {
-=======
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
     const { name, value } = e.target
     setAccountForm((prev) => ({
       ...prev,
@@ -324,67 +305,6 @@ export default function EmployerDashboardPage({
       ...prev,
       [name]: type === 'checkbox' ? checked : value,
     }))
-  }
-
-  async function handleSubmitAccount(e) {
-    e.preventDefault()
-    setAccountLoading(true)
-    setAccountError('')
-    setAccountMessage('')
-
-    try {
-      await onUpdateEmployerAccount({
-        business_name: accountForm.business_name,
-        industry: accountForm.industry,
-        contact_name: accountForm.contact_name,
-        email: accountForm.email,
-        phone: accountForm.phone,
-        website: accountForm.website,
-        address: accountForm.address,
-        city: accountForm.city,
-        notes: accountForm.notes,
-        is_hiring: !!accountForm.is_hiring,
-      })
-      setAccountMessage('Employer account updated successfully.')
-    } catch (err) {
-      setAccountError(err.message || 'Failed to update employer account.')
-    } finally {
-      setAccountLoading(false)
-    }
-  }
-
-  async function handleSubmitPassword(e) {
-    e.preventDefault()
-    setPasswordLoading(true)
-    setPasswordError('')
-    setPasswordMessage('')
-
-    try {
-      if (!passwordForm.current_password || !passwordForm.new_password || !passwordForm.confirm_password) {
-        throw new Error('Please fill out all password fields.')
-      }
-
-      if (passwordForm.new_password !== passwordForm.confirm_password) {
-        throw new Error('New password and confirm password do not match.')
-      }
-
-      await onUpdateEmployerPassword({
-        current_password: passwordForm.current_password,
-        new_password: passwordForm.new_password,
-        confirm_password: passwordForm.confirm_password,
-      })
-
-      setPasswordForm({
-        current_password: '',
-        new_password: '',
-        confirm_password: '',
-      })
-      setPasswordMessage('Password updated successfully.')
-    } catch (err) {
-      setPasswordError(err.message || 'Failed to update password.')
-    } finally {
-      setPasswordLoading(false)
-    }
   }
 
   async function handleSubmitAccount(e) {
@@ -729,11 +649,6 @@ export default function EmployerDashboardPage({
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-sm font-semibold text-white">{resume.full_name}</div>
                             <div className="mt-1 truncate text-xs text-slate-400">{resume.desired_job_title || 'No desired title'}</div>
-<<<<<<< HEAD
-                            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
-                              {resume.city ? <span>{resume.city}</span> : null}
-                              {resume.employment_type ? <span>{humanizeJobType(resume.employment_type)}</span> : null}
-=======
                             {resume.job_title ? <div className="mt-1 truncate text-[11px] text-slate-500">Applied to: {resume.job_title}</div> : null}
                             <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
                               {resume.city ? <span>{resume.city}</span> : null}
@@ -743,9 +658,7 @@ export default function EmployerDashboardPage({
                             <div className="mt-2 flex flex-wrap gap-2">
                               {resume.ats_recommendation ? <div className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${atsBadgeClass(resume.ats_recommendation)}`}>{formatAtsRecommendation(resume.ats_recommendation)}</div> : null}
                               {candidateAction?.status ? <div className="inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-300">{humanizeStatus(candidateAction.status)}</div> : null}
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                             </div>
-                            {candidateAction?.status ? <div className="mt-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-300">{humanizeStatus(candidateAction.status)}</div> : null}
                           </div>
                         </button>
                       )
@@ -763,11 +676,7 @@ export default function EmployerDashboardPage({
               <PanelHeader
                 icon={PlusCircle}
                 title={editingJobId ? 'Edit Job' : 'Post a Job'}
-<<<<<<< HEAD
-                subtitle="Keep the form in its own section so it doesn’t crowd everything else."
-=======
                 subtitle="Use the cleaner form to manage one listing, certify compliance, and let open posts auto-expire after 14 days."
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
               />
               <form onSubmit={handleSubmitJob} className="space-y-4 p-5">
                 <Field label="Job Title" required>
@@ -867,8 +776,6 @@ export default function EmployerDashboardPage({
                   </select>
                 </Field>
 
-<<<<<<< HEAD
-=======
                 <div className="rounded-[26px] border border-amber-400/20 bg-amber-400/10 p-4 text-sm text-amber-100">
                   <div className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">Posting rules built into TarboroJobs</div>
                   <ul className="mt-3 space-y-2 text-sm leading-6 text-amber-50/90">
@@ -893,7 +800,6 @@ export default function EmployerDashboardPage({
                   </span>
                 </label>
 
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                 {jobMessage ? <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">{jobMessage}</div> : null}
                 {jobError ? <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{jobError}</div> : null}
 
@@ -914,11 +820,7 @@ export default function EmployerDashboardPage({
             </section>
 
             <section className={panelClassName()}>
-<<<<<<< HEAD
-              <PanelHeader icon={Briefcase} title="My Jobs" subtitle="Listings stay separate from the form so the page breathes on mobile, too." />
-=======
               <PanelHeader icon={Briefcase} title="My Jobs" subtitle="Track what is live, what expired, and what needs a 14-day renewal." />
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
               <div className="space-y-4 p-5">
                 {jobsLoading ? (
                   <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-sm text-slate-400">Loading your jobs...</div>
@@ -948,11 +850,7 @@ export default function EmployerDashboardPage({
                             <Trash2 className="h-3.5 w-3.5" /> {deletingJobId === job.id ? 'Deleting...' : 'Delete'}
                           </button>
 
-<<<<<<< HEAD
-                          {job.status !== 'open' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'open')} className="inline-flex items-center gap-1.5 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/15"><CheckCircle2 className="h-3.5 w-3.5" /> Open</button> : null}
-=======
                           {job.status !== 'open' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'open')} className="inline-flex items-center gap-1.5 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/15"><CheckCircle2 className="h-3.5 w-3.5" /> Renew 14 Days</button> : null}
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                           {job.status !== 'filled' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'filled')} className="inline-flex items-center gap-1.5 rounded-2xl border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-300 transition hover:bg-cyan-500/15"><CheckCircle2 className="h-3.5 w-3.5" /> Filled</button> : null}
                           {job.status !== 'closed' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'closed')} className="inline-flex items-center gap-1.5 rounded-2xl border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 transition hover:bg-rose-500/15"><XCircle className="h-3.5 w-3.5" /> Close</button> : null}
                           {job.status !== 'draft' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'draft')} className="inline-flex items-center gap-1.5 rounded-2xl border border-slate-700 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600"><PencilLine className="h-3.5 w-3.5" /> Draft</button> : null}
@@ -963,12 +861,9 @@ export default function EmployerDashboardPage({
                       <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-500">
                         {job.pay_display ? <span>{job.pay_display}</span> : null}
                         {job.experience_level ? <span>{job.experience_level}</span> : null}
-<<<<<<< HEAD
-=======
                         {job.published_at ? <span>Live {formatShortDate(job.published_at)}</span> : null}
                         <span>{formatExpirationLabel(job)}</span>
                         {job.expired_at ? <span>Expired {formatShortDate(job.expired_at)}</span> : null}
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                         {job.created_at ? <span>Created {formatShortDate(job.created_at)}</span> : null}
                         {job.updated_at ? <span>Updated {formatShortDate(job.updated_at)}</span> : null}
                       </div>
@@ -1061,13 +956,6 @@ export default function EmployerDashboardPage({
                             <div className="min-w-0 flex-1">
                               <div className="truncate text-sm font-semibold text-white">{resume.full_name}</div>
                               <div className="mt-1 truncate text-xs text-slate-400">{resume.desired_job_title || 'No desired title'}</div>
-<<<<<<< HEAD
-                              <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
-                                {resume.city ? <span>{resume.city}</span> : null}
-                                {resume.employment_type ? <span>{humanizeJobType(resume.employment_type)}</span> : null}
-                              </div>
-                              {candidateAction?.status ? <div className="mt-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-300">{humanizeStatus(candidateAction.status)}</div> : null}
-=======
                               {resume.job_title ? <div className="mt-1 truncate text-[11px] text-slate-500">Applied to: {resume.job_title}</div> : null}
                               <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
                                 {resume.city ? <span>{resume.city}</span> : null}
@@ -1078,7 +966,6 @@ export default function EmployerDashboardPage({
                                 {resume.ats_recommendation ? <div className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${atsBadgeClass(resume.ats_recommendation)}`}>{formatAtsRecommendation(resume.ats_recommendation)}</div> : null}
                                 {candidateAction?.status ? <div className="inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-300">{humanizeStatus(candidateAction.status)}</div> : null}
                               </div>
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                               {candidateAction?.notes ? <div className="mt-2 line-clamp-2 text-xs text-slate-500">{candidateAction.notes}</div> : null}
                               <div className="mt-2 text-xs text-slate-500">{resume.created_at ? formatShortDate(resume.created_at) : 'Recently submitted'}</div>
                             </div>
@@ -1126,11 +1013,8 @@ export default function EmployerDashboardPage({
                           <div className="flex flex-wrap gap-2 text-sm text-slate-400">
                             {selectedResume.city ? <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1"><MapPin className="h-3.5 w-3.5" /> {selectedResume.city}</span> : null}
                             {selectedResume.employment_type ? <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1"><Briefcase className="h-3.5 w-3.5" /> {humanizeJobType(selectedResume.employment_type)}</span> : null}
-<<<<<<< HEAD
-=======
                             {selectedResume.job_title ? <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1"><Briefcase className="h-3.5 w-3.5" /> Applied to {selectedResume.job_title}</span> : null}
                             {selectedResume.ats_recommendation ? <span className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 ${atsBadgeClass(selectedResume.ats_recommendation)}`}>{formatAtsRecommendation(selectedResume.ats_recommendation)}{selectedResume.ats_score !== null && selectedResume.ats_score !== undefined ? ` • ${Math.round(selectedResume.ats_score)}%` : ''}</span> : null}
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                             {selectedCandidateAction?.status ? <span className="inline-flex items-center gap-1 rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1 text-cyan-300">{humanizeStatus(selectedCandidateAction.status)}</span> : null}
                           </div>
 
@@ -1146,8 +1030,6 @@ export default function EmployerDashboardPage({
                             </div>
                           ) : null}
 
-<<<<<<< HEAD
-=======
                           {(selectedResume.ats_summary || (selectedResume.ats_keywords_matched && selectedResume.ats_keywords_matched.length > 0) || (selectedResume.ats_keywords_missing && selectedResume.ats_keywords_missing.length > 0)) ? (
                             <div>
                               <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400"><ShieldCheck className="h-4 w-4" /> ATS Review</div>
@@ -1159,7 +1041,6 @@ export default function EmployerDashboardPage({
                             </div>
                           ) : null}
 
->>>>>>> a7ef58f (Add job detail pages, apply flow, employer scoping, and ATS scoring)
                           {selectedResume.resume_text ? (
                             <div>
                               <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400"><FileBadge className="h-4 w-4" /> Resume Summary</div>
