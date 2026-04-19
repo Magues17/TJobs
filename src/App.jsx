@@ -330,7 +330,9 @@ function getInitialRoute() {
     }
   }
 
-  if (page === 'employer-onboarding') return { page: 'employer-onboarding', jobId: null }
+  if (page === 'employer-onboarding' || (token && !page)) {
+    return { page: 'employer-onboarding', jobId: null }
+  }
   if (legalPages.includes(page) || adminPages.includes(page)) return { page, jobId: null }
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
