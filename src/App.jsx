@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  ShieldCheck,
   X,
 } from 'lucide-react'
 import {
@@ -33,6 +34,22 @@ import {
   getStoredEmployerToken,
   clearStoredEmployerToken,
 } from './employer/auth'
+import {
+  loadAdminSession as apiLoadAdminSession,
+  loadAdminEmployers as apiLoadAdminEmployers,
+  loadAdminJobs as apiLoadAdminJobs,
+  loadAdminTokens as apiLoadAdminTokens,
+  createAdminOnboardingToken as apiCreateAdminOnboardingToken,
+  approveAdminEmployer as apiApproveAdminEmployer,
+  deactivateAdminEmployer as apiDeactivateAdminEmployer,
+  reactivateAdminEmployer as apiReactivateAdminEmployer,
+  revokeAdminToken as apiRevokeAdminToken,
+  deleteAdminJob as apiDeleteAdminJob,
+} from './admin/api'
+import {
+  getStoredAdminApiKey,
+  clearStoredAdminApiKey,
+} from './admin/auth'
 import { humanizeJobType } from './employer/utils'
 import {
   employerIndustries,
@@ -47,6 +64,8 @@ import EmployerDashboardPage from './employer/EmployerDashboardPage'
 import EmployerForgotPasswordPage from './employer/EmployerForgotPasswordPage'
 import EmployerResetPasswordPage from './employer/EmployerResetPasswordPage'
 import CandidateActionPanel from './employer/CandidateActionPanel'
+import AdminLoginPage from './admin/AdminLoginPage'
+import AdminDashboardPage from './admin/AdminDashboardPage'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 const FILE_BASE = (import.meta.env.VITE_FILE_BASE || '').replace(/\/$/, '')
@@ -70,6 +89,7 @@ const industries = [
 const jobTypes = ['All Types', 'Full Time', 'Part Time', 'Temporary', 'Contract']
 
 const legalPages = ['privacy-policy', 'terms-of-use', 'employer-posting-rules']
+const adminPages = ['admin-login', 'admin-dashboard']
 const LEGAL_LAST_UPDATED = 'April 18, 2026'
 
 const privacyPolicySections = [
@@ -311,7 +331,7 @@ function getInitialRoute() {
   }
 
   if (page === 'employer-onboarding') return { page: 'employer-onboarding', jobId: null }
-  if (legalPages.includes(page)) return { page, jobId: null }
+  if (legalPages.includes(page) || adminPages.includes(page)) return { page, jobId: null }
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
   }
@@ -322,7 +342,7 @@ function getInitialRoute() {
 function buildPublicPath(page, jobId = null) {
   if (page === 'job-detail' && jobId) return `/jobs/${jobId}`
   if (page === 'job-apply' && jobId) return `/jobs/${jobId}/apply`
-  if (legalPages.includes(page)) return `/?page=${page}`
+  if (legalPages.includes(page) || adminPages.includes(page)) return `/?page=${page}`
   return '/'
 }
 
@@ -333,7 +353,7 @@ function formatPostedDate(value) {
   return date.toLocaleDateString()
 }
 
-function Shell({ currentPage, setCurrentPage, employerSession, onLogout, children }) {
+function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onLogout, children }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const navItems = [
@@ -341,8 +361,15 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
     { key: 'businesses', label: 'Businesses', icon: Building2 },
     { key: 'list-business', label: 'For Employers', icon: Landmark },
     employerSession
-      ? { key: 'employer-dashboard', label: 'Dashboard', icon: LayoutDashboard }
+      ? {
+          key: 'employer-dashboard',
+          label: employerSession?.admin?.is_admin ? 'Employer Dashboard' : 'Dashboard',
+          icon: LayoutDashboard,
+        }
       : { key: 'employer-login', label: 'Employer Login', icon: LayoutDashboard },
+    ...(adminSession
+      ? [{ key: 'admin-dashboard', label: 'Admin Dashboard', icon: ShieldCheck }]
+      : []),
   ]
 
   useEffect(() => {
@@ -405,7 +432,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
               })}
             </nav>
 
-            {employerSession && (
+            {(employerSession || adminSession) && (
               <button
                 onClick={handleLogoutClick}
                 className="inline-flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-900/85 px-3.5 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white"
@@ -450,7 +477,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
                 )
               })}
 
-              {employerSession && (
+              {(employerSession || adminSession) && (
                 <button
                   onClick={handleLogoutClick}
                   className="mt-1 flex w-full items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-3 text-left text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white"
@@ -473,6 +500,8 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
             <button type="button" onClick={() => handleNavClick('privacy-policy')} className="text-left transition hover:text-cyan-300">Privacy Policy</button>
             <button type="button" onClick={() => handleNavClick('terms-of-use')} className="text-left transition hover:text-cyan-300">Terms of Use</button>
             <button type="button" onClick={() => handleNavClick('employer-posting-rules')} className="text-left transition hover:text-cyan-300">Employer Posting Rules</button>
+            <button type="button" onClick={() => handleNavClick(employerSession ? 'employer-dashboard' : 'employer-login')} className="text-left transition hover:text-cyan-300">{employerSession?.admin?.is_admin ? 'Employer Dashboard' : employerSession ? 'Dashboard' : 'Employer Login'}</button>
+            <button type="button" onClick={() => handleNavClick(adminSession ? 'admin-dashboard' : 'admin-login')} className="text-left transition hover:text-cyan-300">{adminSession ? 'Admin Dashboard' : 'Admin'}</button>
             <a href="mailto:jobs@tarborojobs.com" className="transition hover:text-cyan-300">Contact</a>
           </div>
         </div>
@@ -1473,6 +1502,16 @@ export default function TarboroJobsHomepage() {
   const [publicJobError, setPublicJobError] = useState('')
   const [employerSession, setEmployerSession] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [adminSession, setAdminSession] = useState(null)
+  const [adminLoading, setAdminLoading] = useState(true)
+  const [adminOverview, setAdminOverview] = useState({})
+  const [adminEmployers, setAdminEmployers] = useState([])
+  const [adminJobs, setAdminJobs] = useState([])
+  const [adminTokens, setAdminTokens] = useState([])
+  const [adminDataLoading, setAdminDataLoading] = useState(false)
+  const [adminActionLoading, setAdminActionLoading] = useState(false)
+  const [adminActionMessage, setAdminActionMessage] = useState('')
+  const [adminActionError, setAdminActionError] = useState('')
   const [employerJobs, setEmployerJobs] = useState([])
   const [employerJobsLoading, setEmployerJobsLoading] = useState(false)
   const [editingJobId, setEditingJobId] = useState(null)
@@ -1518,7 +1557,7 @@ export default function TarboroJobsHomepage() {
   const [candidateActionError, setCandidateActionError] = useState('')
 
   function setBrowserLocation(page, jobId = null, options = {}) {
-    if (!['jobs', 'job-detail', 'job-apply', ...legalPages].includes(page)) return
+    if (!['jobs', 'job-detail', 'job-apply', ...legalPages, ...adminPages].includes(page)) return
 
     const nextPath = buildPublicPath(page, jobId)
     const currentPath = `${window.location.pathname}${window.location.search}`
@@ -1539,7 +1578,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (page === 'job-detail' || page === 'job-apply' || legalPages.includes(page)) {
+    if (page === 'job-detail' || page === 'job-apply' || legalPages.includes(page) || adminPages.includes(page)) {
       setBrowserLocation(page, jobId, options)
     }
   }
@@ -1550,7 +1589,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (legalPages.includes(page)) {
+    if (legalPages.includes(page) || adminPages.includes(page)) {
       navigateToPage(page, null)
       return
     }
@@ -1752,6 +1791,13 @@ export default function TarboroJobsHomepage() {
 
     if (!token) {
       setEmployerSession(null)
+      if (!getStoredAdminApiKey()) {
+        setAdminSession(null)
+        setAdminOverview({})
+        setAdminEmployers([])
+        setAdminJobs([])
+        setAdminTokens([])
+      }
       setAuthLoading(false)
       return
     }
@@ -1760,18 +1806,218 @@ export default function TarboroJobsHomepage() {
       const data = await apiLoadEmployerSession(token)
       setEmployerSession(data)
 
-      await Promise.all([
-        loadEmployerJobs(token),
-        loadEmployerStats(token),
-        loadEmployerResumes(token, resumeFilters, candidateView),
-      ])
+      if (data?.admin?.is_admin) {
+        setAdminSession(data.admin)
+
+        try {
+          await refreshAdminData()
+        } catch (adminError) {
+          console.error('Failed to load admin dashboard data:', adminError)
+        }
+      } else if (!getStoredAdminApiKey()) {
+        setAdminSession(null)
+        setAdminOverview({})
+        setAdminEmployers([])
+        setAdminJobs([])
+        setAdminTokens([])
+      }
+
+      const canLoadEmployerWorkspace =
+        data?.admin?.is_admin ||
+        (data?.employer?.onboarding_completed && data?.employer?.access_status === 'active')
+
+      if (canLoadEmployerWorkspace) {
+        await Promise.all([
+          loadEmployerJobs(token),
+          loadEmployerStats(token),
+          loadEmployerResumes(token, resumeFilters, candidateView),
+        ])
+      } else {
+        setEmployerJobs([])
+        setEmployerResumes([])
+        setSelectedResume(null)
+      }
     } catch (error) {
       console.error('Failed to load employer session:', error)
       clearStoredEmployerToken()
       setEmployerSession(null)
+      if (!getStoredAdminApiKey()) {
+        setAdminSession(null)
+        setAdminOverview({})
+        setAdminEmployers([])
+        setAdminJobs([])
+        setAdminTokens([])
+      }
     } finally {
       setAuthLoading(false)
     }
+  }
+
+
+  async function refreshAdminData(apiKeyOverride) {
+    const apiKey = apiKeyOverride || getStoredAdminApiKey()
+    const employerToken = !apiKey ? getStoredEmployerToken() : ''
+
+    if (!apiKey && !employerToken) {
+      setAdminOverview({})
+      setAdminEmployers([])
+      setAdminJobs([])
+      setAdminTokens([])
+      return
+    }
+
+    try {
+      setAdminDataLoading(true)
+      const [sessionData, employerData, jobData, tokenData] = await Promise.all([
+        apiLoadAdminSession(apiKey || undefined),
+        apiLoadAdminEmployers(apiKey || undefined),
+        apiLoadAdminJobs(apiKey || undefined),
+        apiLoadAdminTokens(apiKey || undefined),
+      ])
+
+      setAdminSession(sessionData.admin || { authenticated: true })
+      setAdminOverview(sessionData.overview || {})
+      setAdminEmployers(employerData.employers || [])
+      setAdminJobs(jobData.jobs || [])
+      setAdminTokens(tokenData.tokens || [])
+    } catch (error) {
+      console.error('Failed to refresh admin data:', error)
+      if (apiKey) {
+        clearStoredAdminApiKey()
+      }
+      setAdminSession(null)
+      setAdminOverview({})
+      setAdminEmployers([])
+      setAdminJobs([])
+      setAdminTokens([])
+      throw error
+    } finally {
+      setAdminDataLoading(false)
+      setAdminLoading(false)
+    }
+  }
+
+  async function loadAdminSession(apiKeyOverride) {
+    const apiKey = apiKeyOverride || getStoredAdminApiKey()
+    const employerToken = !apiKey ? getStoredEmployerToken() : ''
+
+    if (!apiKey && !employerToken) {
+      setAdminSession(null)
+      setAdminLoading(false)
+      return
+    }
+
+    try {
+      setAdminLoading(true)
+      const sessionData = await apiLoadAdminSession(apiKey || undefined)
+      setAdminSession(sessionData.admin || { authenticated: true, is_admin: true })
+      await refreshAdminData(apiKey || undefined)
+    } catch (error) {
+      console.error('Failed to load admin session:', error)
+      if (apiKey) {
+        clearStoredAdminApiKey()
+      }
+      setAdminSession(null)
+      setAdminOverview({})
+      setAdminEmployers([])
+      setAdminJobs([])
+      setAdminTokens([])
+      setAdminLoading(false)
+      throw error
+    }
+  }
+
+  async function runAdminAction(action, successMessage) {
+    setAdminActionLoading(true)
+    setAdminActionMessage('')
+    setAdminActionError('')
+
+    try {
+      await action()
+      await refreshAdminData()
+      await Promise.all([loadBusinesses(), loadJobs()])
+      setAdminActionMessage(successMessage)
+    } catch (error) {
+      setAdminActionError(error.message || 'Admin action failed.')
+      throw error
+    } finally {
+      setAdminActionLoading(false)
+    }
+  }
+
+  async function createAdminOnboardingToken(payload) {
+    await runAdminAction(
+      async () => {
+        await apiCreateAdminOnboardingToken(undefined, payload)
+      },
+      'Onboarding link created successfully.'
+    )
+  }
+
+  async function approveAdminEmployer(employerId) {
+    await runAdminAction(
+      async () => {
+        await apiApproveAdminEmployer(undefined, employerId)
+      },
+      'Employer approved successfully.'
+    )
+  }
+
+  async function deactivateAdminEmployer(employerId) {
+    await runAdminAction(
+      async () => {
+        await apiDeactivateAdminEmployer(undefined, employerId)
+      },
+      'Employer deactivated successfully.'
+    )
+  }
+
+  async function reactivateAdminEmployer(employerId) {
+    await runAdminAction(
+      async () => {
+        await apiReactivateAdminEmployer(undefined, employerId)
+      },
+      'Employer reactivated successfully.'
+    )
+  }
+
+  async function revokeAdminToken(tokenId) {
+    await runAdminAction(
+      async () => {
+        await apiRevokeAdminToken(undefined, tokenId)
+      },
+      'Onboarding link revoked successfully.'
+    )
+  }
+
+  async function deleteAdminJob(jobId) {
+    await runAdminAction(
+      async () => {
+        await apiDeleteAdminJob(undefined, jobId)
+      },
+      'Job post removed successfully.'
+    )
+  }
+
+  function handleAdminLogout() {
+    const hasApiKeySession = !!getStoredAdminApiKey()
+
+    clearStoredAdminApiKey()
+    setAdminSession(null)
+    setAdminOverview({})
+    setAdminEmployers([])
+    setAdminJobs([])
+    setAdminTokens([])
+    setAdminActionLoading(false)
+    setAdminActionMessage('')
+    setAdminActionError('')
+
+    if (!hasApiKeySession && employerSession?.admin?.is_admin) {
+      handleLogout()
+      return
+    }
+
+    navigateToPage('admin-login', null, { replace: true })
   }
 
   async function updateEmployerAccount(payload) {
@@ -1913,6 +2159,18 @@ export default function TarboroJobsHomepage() {
     setCandidateActions({})
     setEditingJobId(null)
     setCandidateView('all')
+
+    if (!getStoredAdminApiKey()) {
+      setAdminSession(null)
+      setAdminOverview({})
+      setAdminEmployers([])
+      setAdminJobs([])
+      setAdminTokens([])
+      setAdminActionLoading(false)
+      setAdminActionMessage('')
+      setAdminActionError('')
+    }
+
     setEmployerStats({
       open_jobs: 0,
       total_resumes: 0,
@@ -1932,6 +2190,10 @@ export default function TarboroJobsHomepage() {
     loadBusinesses()
     loadJobs()
     loadEmployerSession()
+
+    if (getStoredAdminApiKey()) {
+      loadAdminSession().catch(() => {})
+    }
   }, [])
 
   useEffect(() => {
@@ -1960,11 +2222,24 @@ export default function TarboroJobsHomepage() {
     }
   }, [authLoading, currentPage, employerSession])
 
+  useEffect(() => {
+    if (!adminLoading && currentPage === 'admin-dashboard' && !adminSession) {
+      navigateToPage('admin-login', null, { replace: true })
+    }
+  }, [adminLoading, currentPage, adminSession])
+
+  useEffect(() => {
+    if (!adminLoading && currentPage === 'admin-login' && adminSession) {
+      navigateToPage('admin-dashboard', null, { replace: true })
+    }
+  }, [adminLoading, currentPage, adminSession])
+
   return (
     <Shell
       currentPage={currentPage}
       setCurrentPage={handleShellPageChange}
       employerSession={employerSession}
+      adminSession={adminSession}
       onLogout={handleLogout}
     >
       {currentPage === 'jobs' && (
@@ -2053,6 +2328,42 @@ export default function TarboroJobsHomepage() {
           Card={Card}
           Field={Field}
           Input={Input}
+        />
+      )}
+      {currentPage === 'admin-login' && (
+        <AdminLoginPage
+          setCurrentPage={setCurrentPage}
+          onLoginSuccess={loadAdminSession}
+          onOpenDashboard={() => navigateToPage('admin-dashboard', null, { replace: true })}
+          SectionHeader={SectionHeader}
+          Card={Card}
+          Field={Field}
+          Input={Input}
+        />
+      )}
+      {currentPage === 'admin-dashboard' && (
+        <AdminDashboardPage
+          adminOverview={adminOverview}
+          employers={adminEmployers}
+          jobs={adminJobs}
+          tokens={adminTokens}
+          loading={adminLoading || adminDataLoading}
+          actionLoading={adminActionLoading}
+          actionMessage={adminActionMessage}
+          actionError={adminActionError}
+          onRefresh={() => refreshAdminData()}
+          onCreateToken={createAdminOnboardingToken}
+          onApproveEmployer={approveAdminEmployer}
+          onDeactivateEmployer={deactivateAdminEmployer}
+          onReactivateEmployer={reactivateAdminEmployer}
+          onRevokeToken={revokeAdminToken}
+          onDeleteJob={deleteAdminJob}
+          onLogout={handleAdminLogout}
+          SectionHeader={SectionHeader}
+          Card={Card}
+          Field={Field}
+          Input={Input}
+          Select={Select}
         />
       )}
       {currentPage === 'employer-dashboard' && (

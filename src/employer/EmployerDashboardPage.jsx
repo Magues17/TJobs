@@ -37,6 +37,7 @@ function getEmptyJobForm(defaultCity = 'Tarboro, NC') {
     job_title: '',
     job_description: '',
     city: defaultCity,
+    industry: '',
     pay_min: '',
     pay_max: '',
     pay_type: 'hourly',
@@ -83,6 +84,20 @@ function atsBadgeClass(value) {
   if (normalized === 'strong_match') return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'
   if (normalized === 'possible_match') return 'border-cyan-400/20 bg-cyan-400/10 text-cyan-300'
   if (normalized === 'low_match') return 'border-amber-400/20 bg-amber-400/10 text-amber-300'
+  return 'border-slate-700 bg-slate-900/70 text-slate-300'
+}
+
+function getCandidateWorkflowStatus(resume, candidateAction = null) {
+  return candidateAction?.status || resume?.candidate_status || 'new'
+}
+
+function candidateStatusBadgeClass(value) {
+  const normalized = String(value || '').toLowerCase()
+  if (normalized === 'new') return 'border-cyan-400/20 bg-cyan-400/10 text-cyan-300'
+  if (normalized === 'reviewed') return 'border-amber-400/20 bg-amber-400/10 text-amber-300'
+  if (normalized === 'interview') return 'border-violet-400/20 bg-violet-400/10 text-violet-300'
+  if (normalized === 'rejected') return 'border-rose-400/20 bg-rose-400/10 text-rose-300'
+  if (normalized === 'hired') return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'
   return 'border-slate-700 bg-slate-900/70 text-slate-300'
 }
 
@@ -375,6 +390,7 @@ export default function EmployerDashboardPage({
       job_title: job.job_title || '',
       job_description: job.job_description || '',
       city: job.city || employer?.city || 'Tarboro, NC',
+      industry: job.industry || employer?.industry || '',
       pay_min: job.pay_min ?? '',
       pay_max: job.pay_max ?? '',
       pay_type: job.pay_type || 'hourly',
@@ -442,16 +458,24 @@ export default function EmployerDashboardPage({
     }
   }
 
-  const showingSavedOnly = candidateView === 'saved'
+  const showingReviewedOnly = candidateView === 'reviewed'
   const filteredCount = resumePagination?.total || 0
   const overallTotalResumes = employerStats?.total_resumes || 0
 
   const quickStats = [
     { icon: Briefcase, label: 'Open Jobs', value: statsLoading ? '...' : employerStats?.open_jobs ?? 0, tone: 'cyan' },
-    { icon: ClipboardList, label: 'Total Resumes', value: statsLoading ? '...' : employerStats?.total_resumes ?? 0, tone: 'slate' },
-    { icon: Bookmark, label: 'Saved Candidates', value: statsLoading ? '...' : employerStats?.saved_candidates ?? 0, tone: 'amber' },
-    { icon: CalendarDays, label: 'Interviews', value: statsLoading ? '...' : employerStats?.interviews_scheduled ?? 0, tone: 'emerald' },
-    { icon: BellRing, label: 'Follow-Ups Due', value: statsLoading ? '...' : employerStats?.follow_ups_due ?? 0, tone: 'rose' },
+    { icon: ClipboardList, label: 'Total Candidates', value: statsLoading ? '...' : employerStats?.total_resumes ?? 0, tone: 'slate' },
+    { icon: Users, label: 'New Applicants', value: statsLoading ? '...' : employerStats?.new_candidates ?? 0, tone: 'cyan' },
+    { icon: Bookmark, label: 'Reviewed', value: statsLoading ? '...' : employerStats?.reviewed_candidates ?? 0, tone: 'amber' },
+    { icon: CalendarDays, label: 'Interview', value: statsLoading ? '...' : employerStats?.interview_candidates ?? 0, tone: 'emerald' },
+  ]
+
+  const candidatePipeline = [
+    { key: 'new', label: 'New', count: employerStats?.new_candidates ?? 0 },
+    { key: 'reviewed', label: 'Reviewed', count: employerStats?.reviewed_candidates ?? 0 },
+    { key: 'interview', label: 'Interview', count: employerStats?.interview_candidates ?? 0 },
+    { key: 'rejected', label: 'Rejected', count: employerStats?.rejected_candidates ?? 0 },
+    { key: 'hired', label: 'Hired', count: employerStats?.hired_candidates ?? 0 },
   ]
 
   const tabItems = [
@@ -472,7 +496,7 @@ export default function EmployerDashboardPage({
           <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-3xl">
               <div className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">
-                Employer dashboard · Midnight Civic
+                Employer dashboard
               </div>
               <h1 className="mt-4 text-3xl font-semibold tracking-tight text-white sm:text-4xl">{employer?.business_name || 'Employer Dashboard'}</h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300 sm:text-base">
@@ -544,7 +568,7 @@ export default function EmployerDashboardPage({
                   <QuickActionButton icon={PlusCircle} label="Post a Job" sublabel="Create or edit listings" onClick={() => setActiveSection('jobs')} />
                   <QuickActionButton icon={Users} label="Open Candidates" sublabel="Review resumes and statuses" onClick={() => setActiveSection('candidates')} />
                   <QuickActionButton icon={ShieldCheck} label="Update Account" sublabel="Business profile and password" onClick={() => setActiveSection('account')} />
-                  <QuickActionButton icon={Bookmark} label="Saved Candidates" sublabel="View only saved applicants" onClick={() => { onCandidateViewChange('saved'); setActiveSection('candidates') }} />
+                  <QuickActionButton icon={Bookmark} label="Reviewed Candidates" sublabel="View only reviewed applicants" onClick={() => { onCandidateViewChange('reviewed'); setActiveSection('candidates') }} />
                 </div>
               </section>
 
@@ -603,6 +627,7 @@ export default function EmployerDashboardPage({
                             <div className="text-base font-semibold text-white">{job.job_title}</div>
                             <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-400">
                               <span>{job.city || 'Tarboro, NC'}</span>
+                              {job.industry ? <><span>•</span><span>{job.industry}</span></> : null}
                               <span>•</span>
                               <span>{humanizeJobType(job.employment_type)}</span>
                               <span>•</span>
@@ -636,6 +661,7 @@ export default function EmployerDashboardPage({
                   ) : (
                     recentCandidates.map((resume) => {
                       const candidateAction = resume.candidate_action || null
+                      const workflowStatus = getCandidateWorkflowStatus(resume, candidateAction)
                       return (
                         <button
                           key={resume.id}
@@ -657,7 +683,7 @@ export default function EmployerDashboardPage({
                             </div>
                             <div className="mt-2 flex flex-wrap gap-2">
                               {resume.ats_recommendation ? <div className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${atsBadgeClass(resume.ats_recommendation)}`}>{formatAtsRecommendation(resume.ats_recommendation)}</div> : null}
-                              {candidateAction?.status ? <div className="inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-300">{humanizeStatus(candidateAction.status)}</div> : null}
+                              <div className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${candidateStatusBadgeClass(workflowStatus)}`}>{humanizeStatus(workflowStatus)}</div>
                             </div>
                           </div>
                         </button>
@@ -702,7 +728,7 @@ export default function EmployerDashboardPage({
                   />
                 </Field>
 
-                <div className="grid gap-4 md:grid-cols-2">
+                <div className="grid gap-4 md:grid-cols-3">
                   <Field label="City">
                     <input
                       name="city"
@@ -711,6 +737,15 @@ export default function EmployerDashboardPage({
                       placeholder="Tarboro, NC"
                       className={inputClassName()}
                     />
+                  </Field>
+
+                  <Field label="Industry">
+                    <select name="industry" value={jobForm.industry} onChange={handleJobFormChange} className={inputClassName()}>
+                      <option value="">Select industry</option>
+                      {employerIndustries.map((industry) => (
+                        <option key={industry} value={industry}>{industry}</option>
+                      ))}
+                    </select>
                   </Field>
 
                   <Field label="Experience Level">
@@ -834,6 +869,7 @@ export default function EmployerDashboardPage({
                           <h3 className="text-lg font-semibold text-white">{job.job_title}</h3>
                           <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-400">
                             <span>{job.city || 'Tarboro, NC'}</span>
+                            {job.industry ? <><span>•</span><span>{job.industry}</span></> : null}
                             <span>•</span>
                             <span>{humanizeJobType(job.employment_type)}</span>
                             <span>•</span>
@@ -879,7 +915,7 @@ export default function EmployerDashboardPage({
           <section className={panelClassName()}>
             <PanelHeader
               icon={Users}
-              title={showingSavedOnly ? 'Saved Candidates' : 'Candidate Resumes'}
+              title={showingReviewedOnly ? 'Reviewed Candidates' : 'Candidate Resumes'}
               subtitle="Candidate review is now its own workspace instead of sharing the page with account forms and job tools."
             />
 
@@ -887,7 +923,7 @@ export default function EmployerDashboardPage({
               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                 <div className="flex flex-wrap gap-3">
                   <TabButton icon={Users} label="All Candidates" active={candidateView === 'all'} onClick={() => onCandidateViewChange('all')} />
-                  <TabButton icon={Bookmark} label="Saved Candidates" active={candidateView === 'saved'} onClick={() => onCandidateViewChange('saved')} />
+                  <TabButton icon={Bookmark} label="Reviewed Candidates" active={candidateView === 'reviewed'} onClick={() => onCandidateViewChange('reviewed')} />
                 </div>
 
                 <div className="text-sm text-slate-400">
@@ -896,10 +932,35 @@ export default function EmployerDashboardPage({
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
-                {showingSavedOnly ? 'Showing only candidates you have marked as Saved.' : 'Submitted resumes may be viewed by active employers on TarboroJobs.com.'}
+                {showingReviewedOnly
+                  ? 'Showing only candidates currently in the Reviewed stage.'
+                  : 'Submitted resumes may be viewed by active employers on TarboroJobs.com. Use the hiring pipeline below to sort applicants by stage.'}
               </div>
 
-              <div className={`grid gap-4 ${showingSavedOnly ? 'md:grid-cols-[1fr_220px_220px]' : 'md:grid-cols-[1fr_220px_220px_220px]'}`}>
+              {!showingReviewedOnly ? (
+                <div className="grid gap-3 lg:grid-cols-5">
+                  {candidatePipeline.map((stage) => {
+                    const active = resumeFilters.candidate_status === stage.key
+                    return (
+                      <button
+                        key={stage.key}
+                        type="button"
+                        onClick={() => onResumeFilterChange('candidate_status', active ? '' : stage.key)}
+                        className={`rounded-2xl border px-4 py-3 text-left transition ${
+                          active
+                            ? `${candidateStatusBadgeClass(stage.key)} shadow-[0_12px_30px_rgba(2,6,23,0.18)]`
+                            : 'border-slate-800 bg-slate-950/60 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.16em]">{stage.label}</div>
+                        <div className="mt-2 text-2xl font-semibold text-white">{statsLoading ? '…' : stage.count}</div>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
+
+              <div className={`grid gap-4 ${showingReviewedOnly ? 'md:grid-cols-[1fr_220px_220px]' : 'md:grid-cols-[1fr_220px_220px_220px]'}`}>
                 <div className="flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
                   <Search className="h-4 w-4 text-slate-500" />
                   <input
@@ -924,7 +985,7 @@ export default function EmployerDashboardPage({
                   ))}
                 </select>
 
-                {!showingSavedOnly ? (
+                {!showingReviewedOnly ? (
                   <select value={resumeFilters.candidate_status} onChange={(e) => onResumeFilterChange('candidate_status', e.target.value)} className={inputClassName()}>
                     <option value="">All Candidate Statuses</option>
                     {candidateStatuses.filter((value) => value !== '').map((value) => (
@@ -939,11 +1000,12 @@ export default function EmployerDashboardPage({
                   {resumesLoading ? (
                     <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center text-sm text-slate-400">Loading resumes...</div>
                   ) : employerResumes.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center text-sm text-slate-400">{showingSavedOnly ? 'No saved candidates found.' : 'No resumes found.'}</div>
+                    <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center text-sm text-slate-400">{showingReviewedOnly ? 'No reviewed candidates found.' : 'No resumes found.'}</div>
                   ) : (
                     employerResumes.map((resume) => {
                       const active = selectedResume?.id === resume.id
                       const candidateAction = resume.candidate_action || null
+                      const workflowStatus = getCandidateWorkflowStatus(resume, candidateAction)
                       return (
                         <button
                           key={resume.id}
@@ -964,7 +1026,7 @@ export default function EmployerDashboardPage({
                               </div>
                               <div className="mt-2 flex flex-wrap gap-2">
                                 {resume.ats_recommendation ? <div className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${atsBadgeClass(resume.ats_recommendation)}`}>{formatAtsRecommendation(resume.ats_recommendation)}</div> : null}
-                                {candidateAction?.status ? <div className="inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-300">{humanizeStatus(candidateAction.status)}</div> : null}
+                                <div className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${candidateStatusBadgeClass(workflowStatus)}`}>{humanizeStatus(workflowStatus)}</div>
                               </div>
                               {candidateAction?.notes ? <div className="mt-2 line-clamp-2 text-xs text-slate-500">{candidateAction.notes}</div> : null}
                               <div className="mt-2 text-xs text-slate-500">{resume.created_at ? formatShortDate(resume.created_at) : 'Recently submitted'}</div>
@@ -985,12 +1047,12 @@ export default function EmployerDashboardPage({
                     </button>
                   </div>
 
-                  <div className="text-xs text-slate-500">{resumePagination.total} total {showingSavedOnly ? 'saved candidates' : 'resumes'}</div>
+                  <div className="text-xs text-slate-500">{resumePagination.total} total {showingReviewedOnly ? 'reviewed candidates' : 'resumes'}</div>
                 </div>
 
                 <div className="space-y-6">
                   {!selectedResume ? (
-                    <div className="rounded-[28px] border border-dashed border-slate-700 bg-slate-950/60 p-10 text-center text-sm text-slate-400">{showingSavedOnly ? 'Select a saved candidate to view details.' : 'Select a resume to view details.'}</div>
+                    <div className="rounded-[28px] border border-dashed border-slate-700 bg-slate-950/60 p-10 text-center text-sm text-slate-400">{showingReviewedOnly ? 'Select a reviewed candidate to view details.' : 'Select a resume to view details.'}</div>
                   ) : (
                     <>
                       <section className={panelClassName('bg-slate-950/60')}>
@@ -1015,7 +1077,7 @@ export default function EmployerDashboardPage({
                             {selectedResume.employment_type ? <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1"><Briefcase className="h-3.5 w-3.5" /> {humanizeJobType(selectedResume.employment_type)}</span> : null}
                             {selectedResume.job_title ? <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1"><Briefcase className="h-3.5 w-3.5" /> Applied to {selectedResume.job_title}</span> : null}
                             {selectedResume.ats_recommendation ? <span className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 ${atsBadgeClass(selectedResume.ats_recommendation)}`}>{formatAtsRecommendation(selectedResume.ats_recommendation)}{selectedResume.ats_score !== null && selectedResume.ats_score !== undefined ? ` • ${Math.round(selectedResume.ats_score)}%` : ''}</span> : null}
-                            {selectedCandidateAction?.status ? <span className="inline-flex items-center gap-1 rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1 text-cyan-300">{humanizeStatus(selectedCandidateAction.status)}</span> : null}
+                            <span className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 ${candidateStatusBadgeClass(getCandidateWorkflowStatus(selectedResume, selectedCandidateAction))}`}>{humanizeStatus(getCandidateWorkflowStatus(selectedResume, selectedCandidateAction))}</span>
                           </div>
 
                           <div className="grid gap-3 md:grid-cols-2">

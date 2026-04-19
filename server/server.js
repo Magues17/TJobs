@@ -22,6 +22,10 @@ const PORT = Number(process.env.PORT || 3000)
 const JOB_POST_EXPIRATION_DAYS = 14
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-change-this'
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || process.env.ADMIN_BEARER_TOKEN || ''
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || 'jobs@tarborojobs.com')
+  .split(',')
+  .map((value) => normalizeEmail(value))
+  .filter(Boolean)
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || ''
 const APP_BASE_URL =
   process.env.APP_BASE_URL ||
@@ -43,14 +47,25 @@ const frontendIndexFile = path.join(frontendDistDir, 'index.html')
 const uploadsRoot = path.join(__dirname, 'uploads')
 const resumesDir = path.join(uploadsRoot, 'resumes')
 
-const ALLOWED_CANDIDATE_STATUSES = new Set([
-  'saved',
-  'archived',
-  'contacted',
-  'interviewing',
-  'hired',
-  'rejected',
-])
+const CANDIDATE_STATUS_ALIASES = {
+  new: ['new'],
+  reviewed: ['reviewed', 'saved', 'contacted', 'archived'],
+  interview: ['interview', 'interviewing'],
+  rejected: ['rejected'],
+  hired: ['hired'],
+}
+
+const CANDIDATE_STATUS_SQL_VALUES = {
+  new: ['', 'new'],
+  reviewed: ['reviewed', 'saved', 'contacted', 'archived'],
+  interview: ['interview', 'interviewing'],
+  rejected: ['rejected'],
+  hired: ['hired'],
+}
+
+const ALLOWED_CANDIDATE_STATUSES = new Set(
+  Object.values(CANDIDATE_STATUS_ALIASES).flat()
+)
 
 const ALLOWED_JOB_STATUSES = new Set(['draft', 'open', 'closed', 'filled', 'expired'])
 const ALLOWED_PAY_TYPES = new Set(['hourly', 'salary', 'daily', 'weekly', 'monthly'])
@@ -178,6 +193,11 @@ function normalizeEmail(value) {
 
 function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim())
+}
+
+function isAdminEmail(value) {
+  const normalized = normalizeEmail(value)
+  return !!normalized && ADMIN_EMAILS.includes(normalized)
 }
 
 function parseBoolean(value) {
@@ -423,6 +443,7 @@ async function findPublicJobPostById(jobId) {
       jp.job_title,
       jp.job_description,
       jp.city,
+      COALESCE(jp.industry, e.industry) AS industry,
       jp.pay_min,
       jp.pay_max,
       jp.pay_type,
@@ -433,7 +454,7 @@ async function findPublicJobPostById(jobId) {
       jp.published_at,
       jp.expires_at,
       e.business_name,
-      e.industry
+      e.industry AS employer_industry
     FROM job_posts jp
     INNER JOIN employers e ON e.id = jp.employer_id
     WHERE jp.id = ?
@@ -637,6 +658,10 @@ async function jobPostsColumnExists(columnName) {
 async function ensureJobPostingComplianceColumns() {
   const columns = [
     {
+      name: 'industry',
+      sql: "ADD COLUMN industry VARCHAR(255) NULL DEFAULT NULL AFTER city",
+    },
+    {
       name: 'published_at',
       sql: 'ADD COLUMN published_at DATETIME NULL DEFAULT NULL AFTER status',
     },
@@ -751,24 +776,53 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;')
 }
 
-function requireAdminAuth(req, res, next) {
-  if (!ADMIN_API_KEY) {
-    return res.status(503).json({
-      success: false,
-      error: 'Admin API key is not configured on the server.',
-    })
-  }
-
+async function requireAdminAuth(req, res, next) {
   const providedKey = getAdminKeyFromRequest(req)
 
-  if (!providedKey || providedKey !== ADMIN_API_KEY) {
-    return res.status(401).json({
-      success: false,
-      error: 'Unauthorized admin request.',
-    })
+  if (ADMIN_API_KEY && providedKey && providedKey === ADMIN_API_KEY) {
+    req.admin = {
+      authenticated: true,
+      is_admin: true,
+      auth_type: 'api_key',
+      email: null,
+    }
+    return next()
   }
 
-  next()
+  const authHeader = req.headers.authorization || ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : ''
+
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET)
+      const session = await loadEmployerSessionByUserId(decoded.user_id)
+
+      if (
+        session &&
+        Number(session.employer_id) === Number(decoded.employer_id) &&
+        session.is_active &&
+        isAdminEmail(session.email)
+      ) {
+        req.admin = {
+          authenticated: true,
+          is_admin: true,
+          auth_type: 'employer_session',
+          employer_user_id: Number(session.id),
+          employer_id: Number(session.employer_id),
+          email: session.email,
+          business_name: session.business_name,
+        }
+        return next()
+      }
+    } catch (error) {
+      // fall through to unauthorized response
+    }
+  }
+
+  return res.status(401).json({
+    success: false,
+    error: 'Unauthorized admin request.',
+  })
 }
 
 async function loadEmployerSessionByUserId(userId) {
@@ -855,16 +909,20 @@ async function requireEmployerAuth(req, res, next) {
       })
     }
 
+    const isAdmin = isAdminEmail(session.email)
+
     req.auth = {
       token,
       user_id: Number(session.id),
       employer_id: Number(session.employer_id),
       email: session.email,
+      is_admin: isAdmin,
       employer_user: {
         id: Number(session.id),
         employer_id: Number(session.employer_id),
         email: session.email,
         is_active: !!session.is_active,
+        is_admin: isAdmin,
       },
       employer: {
         business_name: session.business_name,
@@ -881,6 +939,12 @@ async function requireEmployerAuth(req, res, next) {
         access_status: session.access_status,
         current_period_end: session.current_period_end,
         onboarding_completed: !!session.onboarding_completed,
+      },
+      admin: {
+        authenticated: isAdmin,
+        is_admin: isAdmin,
+        auth_type: isAdmin ? 'employer_session' : null,
+        email: isAdmin ? session.email : null,
       },
     }
 
@@ -920,7 +984,40 @@ function requireEligibleEmployer(req, res, next) {
 
 function normalizeCandidateStatus(status) {
   if (status === undefined || status === null || status === '') return null
-  return String(status).trim().toLowerCase()
+
+  const normalized = String(status).trim().toLowerCase()
+  if (!normalized) return null
+
+  for (const [canonical, aliases] of Object.entries(CANDIDATE_STATUS_ALIASES)) {
+    if (aliases.includes(normalized)) {
+      return canonical
+    }
+  }
+
+  return normalized
+}
+
+function buildCandidateStatusWhereClause(columnName, candidateStatus) {
+  const normalized = normalizeCandidateStatus(candidateStatus)
+
+  if (!normalized) {
+    return null
+  }
+
+  if (normalized === 'new') {
+    return {
+      clause: `(${columnName} IS NULL OR ${columnName} IN (?, ?))`,
+      params: CANDIDATE_STATUS_SQL_VALUES.new,
+    }
+  }
+
+  const values = CANDIDATE_STATUS_SQL_VALUES[normalized] || [normalized]
+  const placeholders = values.map(() => '?').join(', ')
+
+  return {
+    clause: `${columnName} IN (${placeholders})`,
+    params: values,
+  }
 }
 
 function normalizeDateTime(value) {
@@ -932,7 +1029,7 @@ function formatCandidateActionRow(row) {
     id: row.id,
     employer_id: row.employer_id,
     job_seeker_id: row.job_seeker_id,
-    status: row.status,
+    status: normalizeCandidateStatus(row.status) || 'new',
     notes: row.notes || '',
     contacted_at: row.contacted_at,
     interview_at: row.interview_at,
@@ -1255,6 +1352,20 @@ app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, re
         ats.missing_keywords.join(', '),
         ats.title_match ? 1 : 0,
       ]
+    )
+
+    await pool.query(
+      `
+      INSERT INTO employer_candidate_actions
+      (
+        employer_id,
+        job_seeker_id,
+        status,
+        notes
+      )
+      VALUES (?, ?, ?, ?)
+      `,
+      [job.employer_id, result.insertId, 'new', null]
     )
 
     res.json({
@@ -1817,14 +1928,16 @@ app.post('/api/employer-auth/login', async (req, res) => {
       })
     }
 
-    if (!user.onboarding_completed) {
+    const isAdmin = isAdminEmail(user.email)
+
+    if (!isAdmin && !user.onboarding_completed) {
       return res.status(403).json({
         success: false,
         error: 'Employer onboarding is not complete yet.',
       })
     }
 
-    if (!isEmployerEligible(user)) {
+    if (!isAdmin && !isEmployerEligible(user)) {
       return res.status(403).json({
         success: false,
         error: 'This employer account is not eligible for login.',
@@ -1852,6 +1965,12 @@ app.post('/api/employer-auth/login', async (req, res) => {
         subscription_status: user.subscription_status,
         access_status: user.access_status,
         onboarding_completed: !!user.onboarding_completed,
+      },
+      admin: {
+        authenticated: isAdmin,
+        is_admin: isAdmin,
+        auth_type: isAdmin ? 'employer_session' : null,
+        email: isAdmin ? user.email : null,
       },
       message: 'Login successful.',
     })
@@ -2175,6 +2294,7 @@ app.get('/api/employer-auth/me', requireEmployerAuth, async (req, res) => {
     success: true,
     employer_user: req.auth.employer_user,
     employer: req.auth.employer,
+    admin: req.auth.admin,
   })
 })
 
@@ -2396,6 +2516,7 @@ app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asyn
         job_title,
         job_description,
         city,
+        industry,
         pay_min,
         pay_max,
         pay_type,
@@ -2442,6 +2563,7 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
     const jobTitle = safeTrim(req.body.job_title, 255)
     const jobDescription = safeTrim(req.body.job_description, 20000)
     const city = toNullableString(req.body.city, 255)
+    const industry = toNullableString(req.body.industry, 255)
     const payMin = parseMoney(req.body.pay_min)
     const payMax = parseMoney(req.body.pay_max)
     const payType = normalizeEnum(req.body.pay_type, ALLOWED_PAY_TYPES, 'hourly')
@@ -2494,6 +2616,7 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
         job_title,
         job_description,
         city,
+        industry,
         pay_min,
         pay_max,
         pay_type,
@@ -2506,13 +2629,14 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
         posting_guidelines_accepted,
         posting_guidelines_accepted_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         employerId,
         jobTitle,
         jobDescription,
         city,
+        industry,
         payMin,
         payMax,
         payType,
@@ -2576,6 +2700,7 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
     const jobTitle = safeTrim(req.body.job_title, 255)
     const jobDescription = safeTrim(req.body.job_description, 20000)
     const city = toNullableString(req.body.city, 255)
+    const industry = toNullableString(req.body.industry, 255)
     const payMin = parseMoney(req.body.pay_min)
     const payMax = parseMoney(req.body.pay_max)
     const payType = normalizeEnum(req.body.pay_type, ALLOWED_PAY_TYPES, 'hourly')
@@ -2627,6 +2752,7 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
         job_title = ?,
         job_description = ?,
         city = ?,
+        industry = ?,
         pay_min = ?,
         pay_max = ?,
         pay_type = ?,
@@ -2645,6 +2771,7 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
         jobTitle,
         jobDescription,
         city,
+        industry,
         payMin,
         payMax,
         payType,
@@ -2826,8 +2953,19 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
       `
       SELECT
         COUNT(js.id) AS total_resumes,
-        SUM(CASE WHEN eca.status = 'saved' THEN 1 ELSE 0 END) AS saved_candidates,
-        SUM(CASE WHEN eca.interview_at IS NOT NULL THEN 1 ELSE 0 END) AS interviews_scheduled,
+        SUM(
+          CASE
+            WHEN eca.status IS NULL OR eca.status IN (?, ?)
+            THEN 1
+            ELSE 0
+          END
+        ) AS new_candidates,
+        SUM(CASE WHEN eca.status IN (?, ?, ?, ?) THEN 1 ELSE 0 END) AS reviewed_candidates,
+        SUM(CASE WHEN eca.status IN (?, ?) THEN 1 ELSE 0 END) AS interview_candidates,
+        SUM(CASE WHEN eca.status = ? THEN 1 ELSE 0 END) AS rejected_candidates,
+        SUM(CASE WHEN eca.status = ? THEN 1 ELSE 0 END) AS hired_candidates,
+        SUM(CASE WHEN eca.status IN (?, ?, ?, ?) THEN 1 ELSE 0 END) AS saved_candidates,
+        SUM(CASE WHEN eca.status IN (?, ?) THEN 1 ELSE 0 END) AS interviews_scheduled,
         SUM(
           CASE
             WHEN eca.next_follow_up_at IS NOT NULL
@@ -2842,7 +2980,18 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
        AND eca.employer_id = ?
       WHERE js.employer_id = ?
       `,
-      [now, employerId, employerId]
+      [
+        ...CANDIDATE_STATUS_SQL_VALUES.new,
+        ...CANDIDATE_STATUS_SQL_VALUES.reviewed,
+        ...CANDIDATE_STATUS_SQL_VALUES.interview,
+        'rejected',
+        'hired',
+        ...CANDIDATE_STATUS_SQL_VALUES.reviewed,
+        ...CANDIDATE_STATUS_SQL_VALUES.interview,
+        now,
+        employerId,
+        employerId,
+      ]
     )
 
     res.json({
@@ -2850,6 +2999,11 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
       stats: {
         open_jobs: Number(openJobsRows[0]?.total || 0),
         total_resumes: Number(resumeRows[0]?.total_resumes || 0),
+        new_candidates: Number(resumeRows[0]?.new_candidates || 0),
+        reviewed_candidates: Number(resumeRows[0]?.reviewed_candidates || 0),
+        interview_candidates: Number(resumeRows[0]?.interview_candidates || 0),
+        rejected_candidates: Number(resumeRows[0]?.rejected_candidates || 0),
+        hired_candidates: Number(resumeRows[0]?.hired_candidates || 0),
         saved_candidates: Number(resumeRows[0]?.saved_candidates || 0),
         interviews_scheduled: Number(resumeRows[0]?.interviews_scheduled || 0),
         follow_ups_due: Number(resumeRows[0]?.follow_ups_due || 0),
@@ -2913,8 +3067,11 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
     }
 
     if (candidateStatus) {
-      whereParts.push('eca.status = ?')
-      params.push(candidateStatus)
+      const statusFilter = buildCandidateStatusWhereClause('eca.status', candidateStatus)
+      if (statusFilter) {
+        whereParts.push(statusFilter.clause)
+        params.push(...statusFilter.params)
+      }
     }
 
     const whereSql = `WHERE ${whereParts.join(' AND ')}`
@@ -3009,10 +3166,11 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
       ats_title_match: !!row.ats_title_match,
       created_at: row.created_at,
       updated_at: row.updated_at,
+      candidate_status: normalizeCandidateStatus(row.candidate_status) || 'new',
       candidate_action: row.action_id
         ? {
             id: row.action_id,
-            status: row.candidate_status,
+            status: normalizeCandidateStatus(row.candidate_status) || 'new',
             notes: row.candidate_notes || '',
             contacted_at: row.contacted_at,
             interview_at: row.interview_at,
@@ -3059,11 +3217,23 @@ app.post(
           ? safeTrim(req.body.notes, 5000)
           : null
 
-      const contactedAt = normalizeDateTime(req.body.contacted_at)
-      const interviewAt = normalizeDateTime(req.body.interview_at)
-      const hiredAt = normalizeDateTime(req.body.hired_at)
-      const rejectedAt = normalizeDateTime(req.body.rejected_at)
+      let contactedAt = normalizeDateTime(req.body.contacted_at)
+      let interviewAt = normalizeDateTime(req.body.interview_at)
+      let hiredAt = normalizeDateTime(req.body.hired_at)
+      let rejectedAt = normalizeDateTime(req.body.rejected_at)
       const nextFollowUpAt = normalizeDateTime(req.body.next_follow_up_at)
+
+      if (normalizedStatus === 'interview' && !interviewAt) {
+        interviewAt = new Date()
+      }
+
+      if (normalizedStatus === 'hired' && !hiredAt) {
+        hiredAt = new Date()
+      }
+
+      if (normalizedStatus === 'rejected' && !rejectedAt) {
+        rejectedAt = new Date()
+      }
 
       if (!jobSeekerId) {
         return res.status(400).json({
@@ -3084,9 +3254,10 @@ app.post(
         SELECT id
         FROM job_seekers
         WHERE id = ?
+          AND employer_id = ?
         LIMIT 1
         `,
-        [jobSeekerId]
+        [jobSeekerId, employerId]
       )
 
       if (!jobSeekers.length) {
@@ -3397,6 +3568,7 @@ app.get('/api/jobposts', async (req, res) => {
         jp.job_title,
         jp.job_description,
         jp.city,
+        COALESCE(jp.industry, e.industry) AS industry,
         jp.pay_min,
         jp.pay_max,
         jp.pay_type,
@@ -3407,7 +3579,7 @@ app.get('/api/jobposts', async (req, res) => {
         jp.published_at,
         jp.expires_at,
         e.business_name,
-        e.industry
+        e.industry AS employer_industry
       FROM job_posts jp
       INNER JOIN employers e ON e.id = jp.employer_id
       WHERE jp.status = 'open'
@@ -3442,6 +3614,400 @@ app.get('/api/jobposts', async (req, res) => {
     res.status(500).json({
       success: false,
       error: error?.message || 'Failed to fetch job posts.',
+    })
+  }
+})
+
+
+app.get('/api/admin/session', requireAdminAuth, async (req, res) => {
+  try {
+    await expireOpenJobs()
+
+    const [employerResult, jobResult, tokenResult] = await Promise.all([
+      pool.query(
+        `
+        SELECT
+          COUNT(*) AS total_employers,
+          SUM(CASE WHEN access_status = 'active' THEN 1 ELSE 0 END) AS active_employers,
+          SUM(CASE WHEN access_status = 'pending' THEN 1 ELSE 0 END) AS pending_employers,
+          SUM(CASE WHEN onboarding_completed = 1 THEN 1 ELSE 0 END) AS onboarded_employers
+        FROM employers
+        `
+      ),
+      pool.query(
+        `
+        SELECT
+          COUNT(*) AS total_jobs,
+          SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_jobs,
+          SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_jobs,
+          SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS expired_jobs
+        FROM job_posts
+        `
+      ),
+      pool.query(
+        `
+        SELECT
+          COUNT(*) AS total_tokens,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_tokens,
+          SUM(CASE WHEN status = 'used' THEN 1 ELSE 0 END) AS used_tokens,
+          SUM(CASE WHEN status = 'revoked' THEN 1 ELSE 0 END) AS revoked_tokens
+        FROM employer_onboarding_tokens
+        `
+      ),
+    ])
+
+    const [employerRows] = employerResult
+    const [jobRows] = jobResult
+    const [tokenRows] = tokenResult
+
+    const employerCounts = employerRows[0] || {}
+    const jobCounts = jobRows[0] || {}
+    const tokenCounts = tokenRows[0] || {}
+
+    res.json({
+      success: true,
+      admin: {
+        authenticated: true,
+        is_admin: true,
+        auth_type: req.admin?.auth_type || 'api_key',
+        email: req.admin?.email || null,
+      },
+      overview: {
+        total_employers: Number(employerCounts.total_employers || 0),
+        active_employers: Number(employerCounts.active_employers || 0),
+        pending_employers: Number(employerCounts.pending_employers || 0),
+        onboarded_employers: Number(employerCounts.onboarded_employers || 0),
+        total_jobs: Number(jobCounts.total_jobs || 0),
+        open_jobs: Number(jobCounts.open_jobs || 0),
+        closed_jobs: Number(jobCounts.closed_jobs || 0),
+        expired_jobs: Number(jobCounts.expired_jobs || 0),
+        total_tokens: Number(tokenCounts.total_tokens || 0),
+        pending_tokens: Number(tokenCounts.pending_tokens || 0),
+        used_tokens: Number(tokenCounts.used_tokens || 0),
+        revoked_tokens: Number(tokenCounts.revoked_tokens || 0),
+      },
+    })
+  } catch (error) {
+    console.error('GET /api/admin/session error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to load admin session.',
+    })
+  }
+})
+
+app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
+  try {
+    await expireOpenJobs()
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        e.id,
+        e.business_name,
+        e.industry,
+        e.contact_name,
+        e.email,
+        e.phone,
+        e.website,
+        e.address,
+        e.city,
+        e.notes,
+        e.status,
+        e.subscription_status,
+        e.access_status,
+        e.current_period_end,
+        e.onboarding_completed,
+        e.created_at,
+        e.updated_at,
+        eu.id AS employer_user_id,
+        eu.email AS login_email,
+        eu.is_active AS login_is_active,
+        COALESCE(job_counts.total_jobs, 0) AS total_jobs,
+        COALESCE(job_counts.open_jobs, 0) AS open_jobs,
+        COALESCE(candidate_counts.total_candidates, 0) AS total_candidates,
+        last_token.id AS latest_token_id,
+        last_token.status AS latest_token_status,
+        last_token.expires_at AS latest_token_expires_at,
+        last_token.created_at AS latest_token_created_at
+      FROM employers e
+      LEFT JOIN employer_users eu ON eu.employer_id = e.id
+      LEFT JOIN (
+        SELECT
+          employer_id,
+          COUNT(*) AS total_jobs,
+          SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_jobs
+        FROM job_posts
+        GROUP BY employer_id
+      ) job_counts ON job_counts.employer_id = e.id
+      LEFT JOIN (
+        SELECT employer_id, COUNT(*) AS total_candidates
+        FROM job_seekers
+        GROUP BY employer_id
+      ) candidate_counts ON candidate_counts.employer_id = e.id
+      LEFT JOIN employer_onboarding_tokens last_token
+        ON last_token.id = (
+          SELECT t2.id
+          FROM employer_onboarding_tokens t2
+          WHERE t2.employer_id = e.id
+          ORDER BY t2.created_at DESC, t2.id DESC
+          LIMIT 1
+        )
+      ORDER BY e.created_at DESC, e.id DESC
+      `
+    )
+
+    const employers = rows.map((row) => ({
+      id: row.id,
+      business_name: row.business_name,
+      industry: row.industry,
+      contact_name: row.contact_name,
+      email: row.email,
+      phone: row.phone,
+      website: row.website,
+      address: row.address,
+      city: row.city,
+      notes: row.notes,
+      status: row.status,
+      subscription_status: row.subscription_status,
+      access_status: row.access_status,
+      current_period_end: row.current_period_end,
+      onboarding_completed: !!row.onboarding_completed,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      employer_user_id: row.employer_user_id,
+      login_email: row.login_email,
+      login_is_active: row.login_is_active === null ? null : !!row.login_is_active,
+      total_jobs: Number(row.total_jobs || 0),
+      open_jobs: Number(row.open_jobs || 0),
+      total_candidates: Number(row.total_candidates || 0),
+      latest_token: row.latest_token_id
+        ? {
+            id: row.latest_token_id,
+            status: row.latest_token_status,
+            expires_at: row.latest_token_expires_at,
+            created_at: row.latest_token_created_at,
+          }
+        : null,
+    }))
+
+    res.json({
+      success: true,
+      employers,
+    })
+  } catch (error) {
+    console.error('GET /api/admin/employers error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to fetch employers.',
+    })
+  }
+})
+
+app.get('/api/admin/jobs', requireAdminAuth, async (req, res) => {
+  try {
+    await expireOpenJobs()
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        jp.id,
+        jp.employer_id,
+        jp.job_title,
+        jp.job_description,
+        jp.city,
+        COALESCE(jp.industry, e.industry) AS industry,
+        jp.pay_min,
+        jp.pay_max,
+        jp.pay_type,
+        jp.employment_type,
+        jp.experience_level,
+        jp.status,
+        jp.posting_guidelines_accepted,
+        jp.posting_guidelines_accepted_at,
+        jp.created_at,
+        jp.updated_at,
+        jp.published_at,
+        jp.expires_at,
+        jp.expired_at,
+        e.business_name,
+        e.email AS employer_email,
+        e.access_status AS employer_access_status,
+        e.onboarding_completed,
+        COALESCE(app_counts.total_applicants, 0) AS total_applicants
+      FROM job_posts jp
+      INNER JOIN employers e ON e.id = jp.employer_id
+      LEFT JOIN (
+        SELECT job_post_id, COUNT(*) AS total_applicants
+        FROM job_seekers
+        WHERE job_post_id IS NOT NULL
+        GROUP BY job_post_id
+      ) app_counts ON app_counts.job_post_id = jp.id
+      ORDER BY COALESCE(jp.published_at, jp.created_at) DESC, jp.id DESC
+      `
+    )
+
+    const jobs = rows.map((row) => ({
+      id: row.id,
+      employer_id: row.employer_id,
+      employer_name: row.business_name,
+      employer_email: row.employer_email,
+      employer_access_status: row.employer_access_status,
+      employer_onboarding_completed: !!row.onboarding_completed,
+      title: row.job_title,
+      description: row.job_description,
+      city: row.city,
+      industry: row.industry,
+      pay_min: row.pay_min,
+      pay_max: row.pay_max,
+      pay_type: row.pay_type,
+      employment_type: row.employment_type,
+      experience_level: row.experience_level,
+      status: row.status,
+      posting_guidelines_accepted: !!row.posting_guidelines_accepted,
+      posting_guidelines_accepted_at: row.posting_guidelines_accepted_at,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      published_at: row.published_at,
+      expires_at: row.expires_at,
+      expired_at: row.expired_at,
+      total_applicants: Number(row.total_applicants || 0),
+    }))
+
+    res.json({
+      success: true,
+      jobs,
+    })
+  } catch (error) {
+    console.error('GET /api/admin/jobs error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to fetch jobs.',
+    })
+  }
+})
+
+app.get('/api/admin/tokens', requireAdminAuth, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `
+      SELECT
+        t.id,
+        t.employer_id,
+        t.token,
+        t.email,
+        t.square_customer_id,
+        t.square_subscription_id,
+        t.status,
+        t.expires_at,
+        t.used_at,
+        t.created_at,
+        e.business_name,
+        e.access_status,
+        e.onboarding_completed
+      FROM employer_onboarding_tokens t
+      LEFT JOIN employers e ON e.id = t.employer_id
+      ORDER BY t.created_at DESC, t.id DESC
+      LIMIT 200
+      `
+    )
+
+    const tokens = rows.map((row) => ({
+      id: row.id,
+      employer_id: row.employer_id,
+      business_name: row.business_name,
+      email: row.email,
+      square_customer_id: row.square_customer_id,
+      square_subscription_id: row.square_subscription_id,
+      status: row.status,
+      expires_at: row.expires_at,
+      used_at: row.used_at,
+      created_at: row.created_at,
+      onboarding_url: row.token ? buildOnboardingUrl(row.token) : null,
+      employer_access_status: row.access_status,
+      employer_onboarding_completed: !!row.onboarding_completed,
+    }))
+
+    res.json({
+      success: true,
+      tokens,
+    })
+  } catch (error) {
+    console.error('GET /api/admin/tokens error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to fetch onboarding tokens.',
+    })
+  }
+})
+
+app.post('/api/admin/employers/:id/approve', requireAdminAuth, async (req, res) => {
+  try {
+    const employerId = Number(req.params.id)
+
+    if (!employerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid employer ID is required.',
+      })
+    }
+
+    await pool.query(
+      `
+      UPDATE employers
+      SET
+        access_status = 'active',
+        subscription_status = CASE
+          WHEN subscription_status IS NULL OR subscription_status = '' THEN 'active'
+          ELSE subscription_status
+        END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `,
+      [employerId]
+    )
+
+    res.json({
+      success: true,
+      message: 'Employer approved and activated.',
+    })
+  } catch (error) {
+    console.error('POST /api/admin/employers/:id/approve error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to approve employer.',
+    })
+  }
+})
+
+app.delete('/api/admin/jobs/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const jobId = Number(req.params.id)
+
+    if (!jobId) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid job ID is required.',
+      })
+    }
+
+    await pool.query(
+      `
+      DELETE FROM job_posts
+      WHERE id = ?
+      `,
+      [jobId]
+    )
+
+    res.json({
+      success: true,
+      message: 'Job removed successfully.',
+    })
+  } catch (error) {
+    console.error('DELETE /api/admin/jobs/:id error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to remove job.',
     })
   }
 })
