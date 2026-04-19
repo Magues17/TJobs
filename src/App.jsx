@@ -333,6 +333,7 @@ function getInitialRoute() {
   if (page === 'employer-onboarding' || (token && !page)) {
     return { page: 'employer-onboarding', jobId: null }
   }
+  if (page === 'employer-payment-success') return { page: 'employer-payment-success', jobId: null }
   if (legalPages.includes(page) || adminPages.includes(page)) return { page, jobId: null }
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
@@ -345,6 +346,7 @@ function buildPublicPath(page, jobId = null) {
   if (page === 'job-detail' && jobId) return `/jobs/${jobId}`
   if (page === 'job-apply' && jobId) return `/jobs/${jobId}/apply`
   if (legalPages.includes(page) || adminPages.includes(page)) return `/?page=${page}`
+  if (page === 'employer-payment-success') return '/?page=employer-payment-success'
   return '/'
 }
 
@@ -1389,6 +1391,152 @@ function SubmitResumePage({ job, loading, error, onBack }) {
   )
 }
 
+
+function EmployerPaymentSuccessPage({ setCurrentPage }) {
+  const [formData, setFormData] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    return {
+      business_name: params.get('business_name') || '',
+      email: params.get('email') || '',
+    }
+  })
+  const [submitting, setSubmitting] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [onboardingUrl, setOnboardingUrl] = useState('')
+  const [emailSent, setEmailSent] = useState(null)
+
+  function handleChange(event) {
+    const { name, value } = event.target
+    setFormData((prev) => ({ ...prev, [name]: value }))
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setSubmitting(true)
+    setMessage('')
+    setError('')
+    setOnboardingUrl('')
+    setEmailSent(null)
+
+    try {
+      const response = await fetch(`${API_BASE}/employer-plan/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          business_name: formData.business_name,
+          email: formData.email,
+          send_email: true,
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Unable to continue employer setup.')
+      }
+
+      setMessage(data.message || 'Your account setup link is ready.')
+      setOnboardingUrl(data.onboarding_url || '')
+      setEmailSent(Boolean(data.email_sent))
+    } catch (err) {
+      setError(err.message || 'Unable to continue employer setup.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl">
+      <SectionHeader
+        title="Finish Employer Setup"
+        subtitle="After checkout, continue here to receive your onboarding link and open the employer account setup page."
+      />
+
+      <Card title="Complete the handoff from checkout">
+        <div className="space-y-5">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm leading-6 text-slate-300">
+            Enter the business email you want tied to your employer account. We will create a fresh onboarding token, email it to you, and also give you a direct continue button here.
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Business Name">
+                <Input
+                  name="business_name"
+                  value={formData.business_name}
+                  onChange={handleChange}
+                  placeholder="Tarboro Jobs Demo Company"
+                />
+              </Field>
+
+              <Field label="Business Email" required>
+                <Input
+                  type="email"
+                  name="email"
+                  value={formData.email}
+                  onChange={handleChange}
+                  placeholder="owner@business.com"
+                  required
+                />
+              </Field>
+            </div>
+
+            {message && (
+              <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+                {message}
+                {emailSent === true && <div className="mt-1 text-emerald-200">We also emailed the setup link to that address.</div>}
+                {emailSent === false && <div className="mt-1 text-amber-200">Email could not be sent, but you can continue with the button below.</div>}
+              </div>
+            )}
+
+            {error && (
+              <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+                {error}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <button
+                type="submit"
+                disabled={submitting}
+                className="inline-flex items-center justify-center rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {submitting ? 'Preparing setup link...' : 'Continue to Account Setup'}
+              </button>
+
+              <a
+                href="/"
+                className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/60 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-slate-600"
+              >
+                Back to Employer Plan
+              </a>
+            </div>
+          </form>
+
+          {onboardingUrl && (
+            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4">
+              <div className="text-sm font-semibold text-cyan-200">Your setup link is ready</div>
+              <p className="mt-2 text-sm leading-6 text-cyan-100/90">
+                Use the button below to go directly into the employer onboarding form with your token already attached.
+              </p>
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                <a
+                  href={onboardingUrl}
+                  className="inline-flex items-center justify-center rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300"
+                >
+                  Open Account Creation Page
+                </a>
+              </div>
+              <p className="mt-3 break-all text-xs text-cyan-100/80">{onboardingUrl}</p>
+            </div>
+          )}
+        </div>
+      </Card>
+    </div>
+  )
+}
+
 function ListBusinessPage() {
   return (
     <div className="mx-auto max-w-4xl">
@@ -1420,7 +1568,7 @@ function ListBusinessPage() {
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
             <div className="text-sm font-semibold text-white">Built for a cleaner rollout</div>
             <p className="mt-2 text-sm leading-6 text-slate-400">
-              This page now matches the rest of the site visually so the employer side no longer feels disconnected from the public side.
+              After checkout, employers should be sent back to TarboroJobs to continue account setup and receive their onboarding link.
             </p>
           </div>
 
@@ -1559,7 +1707,7 @@ export default function TarboroJobsHomepage() {
   const [candidateActionError, setCandidateActionError] = useState('')
 
   function setBrowserLocation(page, jobId = null, options = {}) {
-    if (!['jobs', 'job-detail', 'job-apply', ...legalPages, ...adminPages].includes(page)) return
+    if (!['jobs', 'job-detail', 'job-apply', 'employer-payment-success', ...legalPages, ...adminPages].includes(page)) return
 
     const nextPath = buildPublicPath(page, jobId)
     const currentPath = `${window.location.pathname}${window.location.search}`
@@ -1580,7 +1728,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (page === 'job-detail' || page === 'job-apply' || legalPages.includes(page) || adminPages.includes(page)) {
+    if (page === 'job-detail' || page === 'job-apply' || page === 'employer-payment-success' || legalPages.includes(page) || adminPages.includes(page)) {
       setBrowserLocation(page, jobId, options)
     }
   }
@@ -2303,6 +2451,7 @@ export default function TarboroJobsHomepage() {
           onBack={() => navigateToPage('jobs', null)}
         />
       )}
+      {currentPage === 'employer-payment-success' && <EmployerPaymentSuccessPage setCurrentPage={setCurrentPage} />}
       {currentPage === 'list-business' && <ListBusinessPage />}
       {currentPage === 'employer-login' && (
         <EmployerLoginPage

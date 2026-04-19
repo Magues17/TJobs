@@ -39,6 +39,14 @@ const EMPLOYER_PASSWORD_RESET_BASE_URL =
   process.env.EMPLOYER_PASSWORD_RESET_BASE_URL ||
   APP_BASE_URL
 const DB_NAME = process.env.DB_NAME || ''
+const PUBLIC_EMPLOYER_PLAN_CLAIM_ENABLED = (() => {
+  const explicit = process.env.PUBLIC_EMPLOYER_PLAN_CLAIM_ENABLED
+  if (explicit !== undefined && String(explicit).trim() !== '') {
+    return parseBoolean(explicit)
+  }
+
+  return /4klabs\.net/i.test(APP_BASE_URL) || /4klabs\.net/i.test(EMPLOYER_ONBOARDING_BASE_URL)
+})()
 
 const projectRoot = path.resolve(__dirname, '..')
 const frontendDistDir = path.join(projectRoot, 'dist')
@@ -1399,6 +1407,153 @@ app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, re
       success: false,
       error: error?.message || 'Failed to submit application.',
     })
+  }
+})
+
+app.post('/api/employer-plan/claim', async (req, res) => {
+  const connection = await pool.getConnection()
+
+  try {
+    if (!PUBLIC_EMPLOYER_PLAN_CLAIM_ENABLED) {
+      return res.status(403).json({
+        success: false,
+        error: 'Employer payment-claim flow is not enabled on this environment.',
+      })
+    }
+
+    await connection.beginTransaction()
+
+    const email = normalizeEmail(req.body.email)
+    const businessName = toNullableString(req.body.business_name, 255)
+    const shouldSendEmail = req.body.send_email === undefined ? true : parseBoolean(req.body.send_email)
+
+    if (!email) {
+      await connection.rollback()
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required to continue employer setup.',
+      })
+    }
+
+    if (!isValidEmail(email)) {
+      await connection.rollback()
+      return res.status(400).json({
+        success: false,
+        error: 'A valid email address is required.',
+      })
+    }
+
+    let employerId = null
+
+    const [existingEmployers] = await connection.query(
+      `
+      SELECT id, onboarding_completed, access_status, subscription_status
+      FROM employers
+      WHERE email = ?
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [email]
+    )
+
+    if (existingEmployers.length > 0) {
+      const existingEmployer = existingEmployers[0]
+      employerId = existingEmployer.id
+
+      if (existingEmployer.onboarding_completed) {
+        await connection.rollback()
+        return res.status(409).json({
+          success: false,
+          error: 'This employer account is already set up. Please log in or use password reset instead.',
+        })
+      }
+
+      await connection.query(
+        `
+        UPDATE employers
+        SET
+          business_name = COALESCE(?, business_name),
+          subscription_status = 'active',
+          access_status = 'pending',
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        `,
+        [businessName, employerId]
+      )
+    } else {
+      const [insertEmployer] = await connection.query(
+        `
+        INSERT INTO employers
+        (
+          business_name,
+          email,
+          subscription_status,
+          access_status,
+          onboarding_completed,
+          status
+        )
+        VALUES (?, ?, 'active', 'pending', 0, 'new')
+        `,
+        [businessName, email]
+      )
+
+      employerId = insertEmployer.insertId
+    }
+
+    await revokePendingTokensForEmployer(connection, employerId)
+
+    const token = generateToken()
+    const expiresAt = addDays(7)
+
+    const [insertToken] = await connection.query(
+      `
+      INSERT INTO employer_onboarding_tokens
+      (
+        employer_id,
+        token,
+        email,
+        status,
+        expires_at
+      )
+      VALUES (?, ?, ?, 'pending', ?)
+      `,
+      [employerId, token, email, expiresAt]
+    )
+
+    await connection.commit()
+
+    let emailSent = false
+    if (shouldSendEmail) {
+      try {
+        emailSent = await sendOnboardingEmail({
+          email,
+          businessName,
+          token,
+        })
+      } catch (mailError) {
+        console.error('Employer payment-claim onboarding email error:', mailError)
+      }
+    }
+
+    res.json({
+      success: true,
+      token,
+      token_id: insertToken.insertId,
+      employer_id: employerId,
+      expires_at: expiresAt,
+      onboarding_url: buildOnboardingUrl(token),
+      email_sent: emailSent,
+      message: 'Your employer setup link is ready.',
+    })
+  } catch (error) {
+    await connection.rollback()
+    console.error('POST /api/employer-plan/claim error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to continue employer setup.',
+    })
+  } finally {
+    connection.release()
   }
 })
 
