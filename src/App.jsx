@@ -22,7 +22,7 @@ import {
   loadEmployerJobs as apiLoadEmployerJobs,
   loadEmployerStats as apiLoadEmployerStats,
   loadEmployerResumes as apiLoadEmployerResumes,
-  loadSavedCandidates as apiLoadSavedCandidates,
+  loadReviewedCandidates as apiLoadReviewedCandidates,
   createEmployerJob as apiCreateEmployerJob,
   updateEmployerJob as apiUpdateEmployerJob,
   updateEmployerJobStatus as apiUpdateEmployerJobStatus,
@@ -60,9 +60,233 @@ const industries = [
   'Construction',
   'Education',
   'Food Service',
+  'Information Technology',
+  'Professional Services',
+  'Hospitality',
+  'Transportation',
+  'Other',
 ]
 
 const jobTypes = ['All Types', 'Full Time', 'Part Time', 'Temporary', 'Contract']
+
+const legalPages = ['privacy-policy', 'terms-of-use', 'employer-posting-rules']
+const LEGAL_LAST_UPDATED = 'April 18, 2026'
+
+const privacyPolicySections = [
+  {
+    heading: '1. Information we collect',
+    body: [
+      'TarboroJobs may collect information you submit directly to us, including employer account details, business profile details, job posting content, applicant contact details, resume files, resume text, messages, and other information you choose to provide through the site.',
+      'We may also collect technical and usage information such as device, browser, IP-address level information, pages visited, referring URLs, and other basic analytics or log data needed to operate, secure, and improve the service.',
+    ],
+  },
+  {
+    heading: '2. How we use information',
+    body: [
+      'We use information to operate TarboroJobs, display business profiles and job listings, process applications, route resumes to the correct employer, communicate with users, maintain account security, prevent abuse, and improve the platform.',
+      'Applicant information is used to deliver applications to the employer associated with the specific job posting and to support related workflow features such as candidate review notes, ATS-style matching, and follow-up activity inside the employer dashboard.',
+    ],
+  },
+  {
+    heading: '3. How information is shared',
+    body: [
+      'Applications, resumes, and related applicant information are shared with the employer that owns the job posting the applicant chose to apply for.',
+      'We may also share information with service providers that help us host, secure, support, or maintain the platform, or when disclosure is reasonably necessary to comply with law, enforce our terms, protect users, investigate misuse, or respond to legal process.',
+    ],
+  },
+  {
+    heading: '4. Data retention',
+    body: [
+      'We retain information for as long as reasonably needed to operate the site, maintain records, resolve disputes, enforce our agreements, and comply with legal obligations. Retention periods may vary based on the type of information and the purpose for which it was collected.',
+      'Even if a posting expires or an account is closed, backups, logs, and certain records may remain for a reasonable period where needed for security, fraud prevention, auditing, or legal compliance.',
+    ],
+  },
+  {
+    heading: '5. Security',
+    body: [
+      'We use reasonable administrative, technical, and organizational measures intended to protect information we control. However, no website, storage system, or transmission method is completely secure, and we cannot guarantee absolute security.',
+      'If TarboroJobs becomes aware of a security incident affecting personal information, we may investigate, take appropriate protective steps, and provide notice where required by applicable law.',
+    ],
+  },
+  {
+    heading: '6. Cookies and similar technologies',
+    body: [
+      'TarboroJobs may use cookies, local storage, session identifiers, and similar technologies for login state, security, preferences, traffic measurement, and basic site functionality.',
+      'You can usually control cookies through your browser settings, but some parts of the service may not function correctly if certain cookies or storage features are disabled.',
+    ],
+  },
+  {
+    heading: '7. Your choices',
+    body: [
+      'You may choose not to provide certain information, but parts of the service may not work properly if required information is missing.',
+      'If you want to request updates to business account information or have privacy questions about information you submitted through TarboroJobs, contact us using the contact details listed below.',
+    ],
+  },
+  {
+    heading: '8. Third-party websites and employer handling',
+    body: [
+      'TarboroJobs may link to third-party websites or services. We are not responsible for the privacy, security, or content practices of third-party sites, employers, or external services.',
+      'Once an employer receives an application through the platform, that employer may maintain its own records and privacy practices. Applicants should review the employer\'s own practices when appropriate.',
+    ],
+  },
+  {
+    heading: '9. Changes to this policy',
+    body: [
+      'We may update this Privacy Policy from time to time. When we do, we may update the last updated date shown on this page. Continued use of the service after updates may constitute acceptance of the revised policy.',
+    ],
+  },
+]
+
+const termsOfUseSections = [
+  {
+    heading: '1. Agreement to these terms',
+    body: [
+      'By accessing or using TarboroJobs, you agree to these Terms of Use and any additional policies posted on the site, including our Privacy Policy and Employer Posting Rules.',
+      'If you do not agree to these terms, do not use the service.',
+    ],
+  },
+  {
+    heading: '2. Service description',
+    body: [
+      'TarboroJobs is a local hiring platform that may include public job listings, business profiles, employer dashboards, application routing, and related tools for job seekers and employers.',
+      'We may add, remove, suspend, or change features at any time without guaranteeing that any particular feature will always remain available.',
+    ],
+  },
+  {
+    heading: '3. Eligibility and account responsibility',
+    body: [
+      'You are responsible for providing accurate information, keeping login credentials confidential, and using the service only for lawful and authorized purposes.',
+      'If you create or use an employer account, you are responsible for all activity that occurs under that account unless and until you notify us of suspected unauthorized access.',
+    ],
+  },
+  {
+    heading: '4. Acceptable use',
+    body: [
+      'You may not use TarboroJobs to violate law, infringe the rights of others, interfere with site operations, upload malicious code, scrape or copy data in an abusive way, impersonate another person or business, or attempt to gain unauthorized access to accounts, systems, or data.',
+      'You may not submit false, misleading, deceptive, discriminatory, harassing, or fraudulent content through the platform.',
+    ],
+  },
+  {
+    heading: '5. User content and postings',
+    body: [
+      'You retain responsibility for the content you submit, including business details, job postings, resumes, application materials, messages, and files.',
+      'By submitting content, you represent that you have the right to provide it and grant TarboroJobs a non-exclusive right to host, store, reproduce, display, process, and transmit that content as needed to operate and promote the service.',
+    ],
+  },
+  {
+    heading: '6. Payments, plans, and availability',
+    body: [
+      'Certain employer features may require payment, an approved onboarding flow, or both. Pricing, plan structure, and included features may change over time.',
+      'Unless expressly stated otherwise in writing, fees are non-refundable after the relevant service or access has been granted or activated.',
+    ],
+  },
+  {
+    heading: '7. Intellectual property',
+    body: [
+      'The TarboroJobs service, site design, branding, code, and original platform content are owned by TarboroJobs or its licensors and are protected by applicable intellectual property laws.',
+      'These terms do not transfer ownership of the platform or grant permission to copy, resell, reverse engineer, or exploit the service beyond normal permitted use.',
+    ],
+  },
+  {
+    heading: '8. No employment guarantee',
+    body: [
+      'TarboroJobs does not guarantee that job seekers will receive interviews or job offers, or that employers will receive qualified applicants.',
+      'We are not a party to the employment relationship between employers and applicants and are not responsible for hiring decisions, workplace conditions, compensation disputes, or employment outcomes.',
+    ],
+  },
+  {
+    heading: '9. Disclaimer and limitation of liability',
+    body: [
+      'The service is provided on an as-is and as-available basis to the fullest extent permitted by law. We do not guarantee uninterrupted availability, error-free operation, or that all content posted by users will be accurate, complete, or current.',
+      'To the fullest extent permitted by law, TarboroJobs will not be liable for indirect, incidental, special, consequential, exemplary, or punitive damages, or for lost profits, lost business, lost data, or similar losses arising out of or related to use of the service.',
+    ],
+  },
+  {
+    heading: '10. Suspension, removal, and termination',
+    body: [
+      'We may review, refuse, remove, suspend, or terminate content, postings, accounts, or access at our discretion when we believe it is appropriate to protect the platform, comply with law, investigate misuse, or enforce these terms or other platform policies.',
+      'Sections that by their nature should survive termination will continue to apply after use of the service ends.',
+    ],
+  },
+  {
+    heading: '11. Governing law',
+    body: [
+      'These terms are governed by the laws of the State of North Carolina, without regard to conflict-of-law rules, except to the extent superseded by applicable federal law.',
+    ],
+  },
+  {
+    heading: '12. Changes to these terms',
+    body: [
+      'We may revise these Terms of Use from time to time by posting an updated version on the site. Continued use of TarboroJobs after changes become effective may constitute acceptance of the updated terms.',
+    ],
+  },
+]
+
+const employerPostingRuleSections = [
+  {
+    heading: '1. Accurate and lawful postings only',
+    body: [
+      'Employers must post only genuine, currently open positions or clearly labeled evergreen talent-pool listings. Job titles, locations, duties, schedules, pay information, and basic requirements must be materially accurate and not misleading.',
+      'Postings must comply with applicable employment, advertising, privacy, anti-discrimination, and wage-related laws and regulations.',
+    ],
+  },
+  {
+    heading: '2. No discriminatory or exclusionary language',
+    body: [
+      'Job postings may not include unlawful discriminatory preferences, exclusions, or limitations based on protected characteristics except where expressly allowed by law.',
+      'Employers are responsible for keeping their own hiring practices and posted requirements compliant with applicable federal, state, and local law.',
+    ],
+  },
+  {
+    heading: '3. No scams, fees, or deceptive recruiting',
+    body: [
+      'Employers may not use TarboroJobs to run scams, phishing campaigns, affiliate funnels, misleading multi-level recruiting schemes, fake application flows, or postings designed primarily to collect personal information without a real hiring purpose.',
+      'Postings may not require applicants to pay application fees, background-check fees, training fees, placement fees, equipment deposits, or similar charges as a condition of applying unless clearly lawful and fully disclosed in advance.',
+    ],
+  },
+  {
+    heading: '4. Employer identity and authority',
+    body: [
+      'You must have authority to represent the business or hiring organization connected to the account and posting. Contact information, business name, and website details should accurately identify the real hiring party or authorized recruiting representative.',
+      'If you are recruiting on behalf of a third party, that relationship must be truthful and authorized.',
+    ],
+  },
+  {
+    heading: '5. One role per post and no spam duplication',
+    body: [
+      'Each posting should represent one role or one clearly defined hiring campaign. Repetitive duplicates, keyword stuffing, excessive reposting, or content designed primarily to game visibility may be removed.',
+      'TarboroJobs may limit, close, or remove stale, expired, misleading, or low-quality postings to keep the board usable for local employers and applicants.',
+    ],
+  },
+  {
+    heading: '6. Handling applicant data',
+    body: [
+      'Employers who receive applications through TarboroJobs must use applicant information only for legitimate hiring-related purposes and must handle that information responsibly and lawfully.',
+      'Sharing, selling, or misusing applicant data for unrelated marketing, spam, or other unauthorized purposes is prohibited.',
+    ],
+  },
+  {
+    heading: '7. Platform review and enforcement',
+    body: [
+      'TarboroJobs may review postings before or after publication and may edit formatting, request clarification, decline publication, suspend access, or remove content that appears unlawful, deceptive, low quality, or inconsistent with platform standards.',
+      'Enforcement decisions are made to protect applicants, employers, and the integrity of the platform and may be taken without prior notice when reasonably necessary.',
+    ],
+  },
+  {
+    heading: '8. Employer responsibility',
+    body: [
+      'Employers remain solely responsible for their hiring decisions, communications, interviews, offers, onboarding, payroll, workplace practices, and compliance obligations.',
+      'TarboroJobs is not the employer of candidates who apply through the platform and does not guarantee the suitability, credentials, or conduct of applicants.',
+    ],
+  },
+  {
+    heading: '9. Reporting concerns',
+    body: [
+      'If TarboroJobs requests additional information about a posting or receives a complaint, employers are expected to respond promptly and in good faith.',
+      'We may remove or suspend postings while concerns are reviewed.',
+    ],
+  },
+]
 
 function getInitialRoute() {
   const pathname = window.location.pathname || '/'
@@ -87,6 +311,7 @@ function getInitialRoute() {
   }
 
   if (page === 'employer-onboarding') return { page: 'employer-onboarding', jobId: null }
+  if (legalPages.includes(page)) return { page, jobId: null }
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
   }
@@ -97,6 +322,7 @@ function getInitialRoute() {
 function buildPublicPath(page, jobId = null) {
   if (page === 'job-detail' && jobId) return `/jobs/${jobId}`
   if (page === 'job-apply' && jobId) return `/jobs/${jobId}/apply`
+  if (legalPages.includes(page)) return `/?page=${page}`
   return '/'
 }
 
@@ -239,6 +465,18 @@ function Shell({ currentPage, setCurrentPage, employerSession, onLogout, childre
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-5 sm:px-5 sm:py-6 md:py-8">{children}</main>
+
+      <footer className="border-t border-slate-800/90 bg-slate-950/85">
+        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-6 text-sm text-slate-400 sm:px-5 md:flex-row md:items-center md:justify-between">
+          <div>© {new Date().getFullYear()} TarboroJobs. Built for local hiring in and around Tarboro.</div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button type="button" onClick={() => handleNavClick('privacy-policy')} className="text-left transition hover:text-cyan-300">Privacy Policy</button>
+            <button type="button" onClick={() => handleNavClick('terms-of-use')} className="text-left transition hover:text-cyan-300">Terms of Use</button>
+            <button type="button" onClick={() => handleNavClick('employer-posting-rules')} className="text-left transition hover:text-cyan-300">Employer Posting Rules</button>
+            <a href="mailto:jobs@tarborojobs.com" className="transition hover:text-cyan-300">Contact</a>
+          </div>
+        </div>
+      </footer>
     </div>
   )
 }
@@ -247,9 +485,9 @@ function SectionHeader({ title, subtitle, action }) {
   return (
     <div className="mb-5 flex flex-col gap-3 md:mb-6 md:flex-row md:items-end md:justify-between">
       <div className="min-w-0">
-        <div className="mb-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">
+        {/* <div className="mb-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">
           Midnight Civic
-        </div>
+        </div> */}
         <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
           {title}
         </h1>
@@ -287,14 +525,21 @@ function SearchRow({
 
         <div className="flex min-h-[54px] items-center gap-2 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
           <ListFilter className="h-4 w-4 shrink-0 text-slate-500" />
-          <select
-            className="w-full bg-transparent text-sm text-slate-100 outline-none"
-            value={industry}
-            onChange={(e) => setIndustry(e.target.value)}
-          >
-            {industries.map((option) => (
-              <option key={option}>{option}</option>
-            ))}
+           <select
+                  className="w-full appearance-none bg-transparent text-sm text-slate-100 outline-none"
+                  style={{ colorScheme: 'dark' }}
+                  value={industry}
+                  onChange={(e) => setIndustry(e.target.value)}
+                    >
+                  {industries.map((option) => (
+                    <option
+                      key={option}
+                      value={option}
+                      style={{ backgroundColor: '#020617', color: '#f8fafc' }}
+                    >
+                      {option}
+                    </option>
+                  ))}
           </select>
         </div>
 
@@ -302,14 +547,21 @@ function SearchRow({
           <div className="flex min-h-[54px] items-center gap-2 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
             <Briefcase className="h-4 w-4 shrink-0 text-slate-500" />
             <select
-              className="w-full bg-transparent text-sm text-slate-100 outline-none"
-              value={type}
-              onChange={(e) => setType(e.target.value)}
-            >
-              {jobTypes.map((option) => (
-                <option key={option}>{option}</option>
-              ))}
-            </select>
+                className="w-full appearance-none bg-transparent text-sm text-slate-100 outline-none"
+                style={{ colorScheme: 'dark' }}
+                value={type}
+                onChange={(e) => setType(e.target.value)}
+              >
+                {jobTypes.map((option) => (
+                  <option
+                    key={option}
+                    value={option}
+                    style={{ backgroundColor: '#020617', color: '#f8fafc' }}
+                  >
+                    {option}
+                  </option>
+                ))}
+          </select>
           </div>
         ) : (
           <div className="flex min-h-[54px] items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm font-medium text-slate-300">
@@ -1164,6 +1416,50 @@ function ListBusinessPage() {
   )
 }
 
+function LegalDocumentPage({ title, subtitle, sections, onBack }) {
+  return (
+    <div className="mx-auto max-w-5xl">
+      <div className="mb-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-600"
+        >
+          Back to jobs
+        </button>
+      </div>
+
+      <SectionHeader title={title} subtitle={subtitle} />
+
+      <div className="mb-5 rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 text-sm leading-6 text-slate-300 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">TarboroJobs Legal</div>
+        <p className="mt-3 text-sm leading-6 text-slate-300">
+          Last updated {LEGAL_LAST_UPDATED}. This page is provided as the current platform policy for TarboroJobs and should be reviewed periodically as the site evolves.
+        </p>
+      </div>
+
+      <div className="space-y-5">
+        {sections.map((section) => (
+          <Card key={section.heading} title={section.heading}>
+            <div className="space-y-4 text-sm leading-7 text-slate-300">
+              {section.body.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+            </div>
+          </Card>
+        ))}
+
+        <Card title="Contact">
+          <div className="space-y-3 text-sm leading-7 text-slate-300">
+            <p>Questions about these policies can be sent to <a href="mailto:jobs@tarborojobs.com" className="text-cyan-300 hover:underline">jobs@tarborojobs.com</a>.</p>
+            <p className="text-slate-400">These pages are a practical launch baseline for TarboroJobs. For business-specific legal advice, local compliance questions, or custom contract language, have counsel review them before full-scale rollout.</p>
+          </div>
+        </Card>
+      </div>
+    </div>
+  )
+}
+
 export default function TarboroJobsHomepage() {
   const initialRoute = getInitialRoute()
   const [currentPage, setCurrentPage] = useState(initialRoute.page)
@@ -1186,6 +1482,11 @@ export default function TarboroJobsHomepage() {
   const [employerStats, setEmployerStats] = useState({
     open_jobs: 0,
     total_resumes: 0,
+    new_candidates: 0,
+    reviewed_candidates: 0,
+    interview_candidates: 0,
+    rejected_candidates: 0,
+    hired_candidates: 0,
     saved_candidates: 0,
     interviews_scheduled: 0,
     follow_ups_due: 0,
@@ -1217,7 +1518,7 @@ export default function TarboroJobsHomepage() {
   const [candidateActionError, setCandidateActionError] = useState('')
 
   function setBrowserLocation(page, jobId = null, options = {}) {
-    if (!['jobs', 'job-detail', 'job-apply'].includes(page)) return
+    if (!['jobs', 'job-detail', 'job-apply', ...legalPages].includes(page)) return
 
     const nextPath = buildPublicPath(page, jobId)
     const currentPath = `${window.location.pathname}${window.location.search}`
@@ -1238,7 +1539,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (page === 'job-detail' || page === 'job-apply') {
+    if (page === 'job-detail' || page === 'job-apply' || legalPages.includes(page)) {
       setBrowserLocation(page, jobId, options)
     }
   }
@@ -1246,6 +1547,11 @@ export default function TarboroJobsHomepage() {
   function handleShellPageChange(page) {
     if (page === 'jobs') {
       navigateToPage('jobs', null)
+      return
+    }
+
+    if (legalPages.includes(page)) {
+      navigateToPage(page, null)
       return
     }
 
@@ -1338,6 +1644,11 @@ export default function TarboroJobsHomepage() {
       setEmployerStats({
         open_jobs: 0,
         total_resumes: 0,
+        new_candidates: 0,
+        reviewed_candidates: 0,
+        interview_candidates: 0,
+        rejected_candidates: 0,
+        hired_candidates: 0,
         saved_candidates: 0,
         interviews_scheduled: 0,
         follow_ups_due: 0,
@@ -1352,6 +1663,11 @@ export default function TarboroJobsHomepage() {
         data.stats || {
           open_jobs: 0,
           total_resumes: 0,
+          new_candidates: 0,
+          reviewed_candidates: 0,
+          interview_candidates: 0,
+          rejected_candidates: 0,
+          hired_candidates: 0,
           saved_candidates: 0,
           interviews_scheduled: 0,
           follow_ups_due: 0,
@@ -1362,6 +1678,11 @@ export default function TarboroJobsHomepage() {
       setEmployerStats({
         open_jobs: 0,
         total_resumes: 0,
+        new_candidates: 0,
+        reviewed_candidates: 0,
+        interview_candidates: 0,
+        rejected_candidates: 0,
+        hired_candidates: 0,
         saved_candidates: 0,
         interviews_scheduled: 0,
         follow_ups_due: 0,
@@ -1385,8 +1706,8 @@ export default function TarboroJobsHomepage() {
       setEmployerResumesLoading(true)
 
       const data =
-        activeView === 'saved'
-          ? await apiLoadSavedCandidates(token, filters)
+        activeView === 'reviewed'
+          ? await apiLoadReviewedCandidates(token, filters)
           : await apiLoadEmployerResumes(token, filters)
 
       const resumes = data.resumes || []
@@ -1595,6 +1916,11 @@ export default function TarboroJobsHomepage() {
     setEmployerStats({
       open_jobs: 0,
       total_resumes: 0,
+      new_candidates: 0,
+      reviewed_candidates: 0,
+      interview_candidates: 0,
+      rejected_candidates: 0,
+      hired_candidates: 0,
       saved_candidates: 0,
       interviews_scheduled: 0,
       follow_ups_due: 0,
@@ -1674,6 +2000,30 @@ export default function TarboroJobsHomepage() {
           loading={publicJobLoading}
           error={publicJobError}
           onBack={() => navigateToPage('job-detail', selectedPublicJobId)}
+        />
+      )}
+      {currentPage === 'privacy-policy' && (
+        <LegalDocumentPage
+          title="Privacy Policy"
+          subtitle="How TarboroJobs collects, uses, shares, and protects information submitted through the platform."
+          sections={privacyPolicySections}
+          onBack={() => navigateToPage('jobs', null)}
+        />
+      )}
+      {currentPage === 'terms-of-use' && (
+        <LegalDocumentPage
+          title="Terms of Use"
+          subtitle="The core rules that govern access to and use of the TarboroJobs platform."
+          sections={termsOfUseSections}
+          onBack={() => navigateToPage('jobs', null)}
+        />
+      )}
+      {currentPage === 'employer-posting-rules' && (
+        <LegalDocumentPage
+          title="Employer Posting Rules"
+          subtitle="Posting standards for employers using TarboroJobs to list jobs and receive applications."
+          sections={employerPostingRuleSections}
+          onBack={() => navigateToPage('jobs', null)}
         />
       )}
       {currentPage === 'list-business' && <ListBusinessPage />}
