@@ -5,6 +5,7 @@ export const employerIndustries = [
   'Construction',
   'Education',
   'Food Service',
+  'Information Technology',
   'Professional Services',
   'Hospitality',
   'Transportation',
@@ -19,10 +20,9 @@ export const employerResumeTypes = ['', 'full-time', 'part-time', 'temporary', '
 
 export const candidateStatuses = [
   '',
-  'saved',
-  'archived',
-  'contacted',
-  'interviewing',
-  'hired',
+  'new',
+  'reviewed',
+  'interview',
   'rejected',
+  'hired',
 ]

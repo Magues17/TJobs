@@ -155,10 +155,10 @@ export async function loadEmployerResumes(tokenOverride, filters = {}) {
   })
 }
 
-export async function loadSavedCandidates(tokenOverride, filters = {}) {
+export async function loadReviewedCandidates(tokenOverride, filters = {}) {
   return loadEmployerResumes(tokenOverride, {
     ...filters,
-    candidate_status: 'saved',
+    candidate_status: 'reviewed',
   })
 }
 

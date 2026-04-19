@@ -256,6 +256,180 @@ function parseDateValue(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed
 }
 
+const RATE_LIMIT_ENABLED = String(process.env.RATE_LIMIT_ENABLED || 'true').trim().toLowerCase() !== 'false'
+const rateLimitStore = new Map()
+let rateLimitSweepCounter = 0
+
+function getClientIp(req) {
+  const forwardedFor = req.headers['x-forwarded-for']
+  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
+    return forwardedFor.split(',')[0].trim()
+  }
+  return req.ip || req.socket?.remoteAddress || 'unknown'
+}
+
+function sweepExpiredRateLimitEntries() {
+  rateLimitSweepCounter += 1
+
+  if (rateLimitSweepCounter % 100 !== 0) {
+    return
+  }
+
+  const now = Date.now()
+
+  for (const [key, entry] of rateLimitStore.entries()) {
+    if (!entry || entry.resetAt <= now) {
+      rateLimitStore.delete(key)
+    }
+  }
+}
+
+function buildRateLimitKey(name, parts = []) {
+  const normalizedParts = parts
+    .flat()
+    .map((part) => safeTrim(part, 255))
+    .filter(Boolean)
+
+  if (!normalizedParts.length) {
+    normalizedParts.push('anonymous')
+  }
+
+  return `${name}:${normalizedParts.join(':')}`
+}
+
+function createRateLimit({
+  name,
+  windowMs,
+  max,
+  keyGenerator,
+  message = 'Too many requests. Please try again later.',
+}) {
+  if (!name || !windowMs || !max) {
+    throw new Error('Rate limiter requires name, windowMs, and max.')
+  }
+
+  return (req, res, next) => {
+    if (!RATE_LIMIT_ENABLED) {
+      return next()
+    }
+
+    sweepExpiredRateLimitEntries()
+
+    const now = Date.now()
+    const keyParts = keyGenerator ? keyGenerator(req) : [getClientIp(req)]
+    const storeKey = buildRateLimitKey(name, keyParts)
+
+    let entry = rateLimitStore.get(storeKey)
+
+    if (!entry || entry.resetAt <= now) {
+      entry = {
+        count: 0,
+        resetAt: now + windowMs,
+      }
+    }
+
+    entry.count += 1
+    rateLimitStore.set(storeKey, entry)
+
+    const remaining = Math.max(max - entry.count, 0)
+    const retryAfterSeconds = Math.max(Math.ceil((entry.resetAt - now) / 1000), 1)
+
+    res.setHeader('X-RateLimit-Limit', String(max))
+    res.setHeader('X-RateLimit-Remaining', String(remaining))
+    res.setHeader('X-RateLimit-Reset', String(Math.ceil(entry.resetAt / 1000)))
+
+    if (entry.count > max) {
+      res.setHeader('Retry-After', String(retryAfterSeconds))
+      return res.status(429).json({
+        success: false,
+        error: message,
+      })
+    }
+
+    return next()
+  }
+}
+
+const publicResumeRateLimit = createRateLimit({
+  name: 'public-resume-submit',
+  windowMs: 60 * 60 * 1000,
+  max: 6,
+  keyGenerator: (req) => [getClientIp(req)],
+  message: 'Too many resume submissions from this network. Please try again later.',
+})
+
+const publicApplyRateLimit = createRateLimit({
+  name: 'public-job-apply',
+  windowMs: 60 * 60 * 1000,
+  max: 8,
+  keyGenerator: (req) => [getClientIp(req), req.params?.id || 'unknown-job'],
+  message: 'Too many application attempts from this network. Please try again later.',
+})
+
+const employerLoginRateLimit = createRateLimit({
+  name: 'employer-login',
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  keyGenerator: (req) => [getClientIp(req), normalizeEmail(req.body?.email) || 'unknown-email'],
+  message: 'Too many login attempts. Please wait a bit and try again.',
+})
+
+const employerForgotPasswordRateLimit = createRateLimit({
+  name: 'employer-forgot-password',
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => [getClientIp(req), normalizeEmail(req.body?.email) || 'unknown-email'],
+  message: 'Too many password reset requests. Please wait before trying again.',
+})
+
+const employerResetPasswordValidateRateLimit = createRateLimit({
+  name: 'employer-reset-password-validate',
+  windowMs: 30 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => [getClientIp(req), sha256(safeTrim(req.query?.token, 255) || 'no-token')],
+  message: 'Too many reset-link validation attempts. Please try again later.',
+})
+
+const employerResetPasswordRateLimit = createRateLimit({
+  name: 'employer-reset-password-complete',
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => [getClientIp(req), sha256(safeTrim(req.body?.token, 255) || 'no-token')],
+  message: 'Too many password reset attempts. Please try again later.',
+})
+
+const employerOnboardingValidateRateLimit = createRateLimit({
+  name: 'employer-onboarding-validate',
+  windowMs: 30 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => [getClientIp(req), sha256(safeTrim(req.query?.token, 255) || 'no-token')],
+  message: 'Too many onboarding token checks. Please try again later.',
+})
+
+const employerOnboardingCompleteRateLimit = createRateLimit({
+  name: 'employer-onboarding-complete',
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => [getClientIp(req), sha256(safeTrim(req.body?.token, 255) || 'no-token')],
+  message: 'Too many onboarding attempts. Please try again later.',
+})
+
+const adminApiRateLimit = createRateLimit({
+  name: 'admin-api',
+  windowMs: 5 * 60 * 1000,
+  max: 120,
+  keyGenerator: (req) => [getClientIp(req)],
+  message: 'Too many admin API requests. Please slow down and try again shortly.',
+})
+
+const adminOnboardingTokenRateLimit = createRateLimit({
+  name: 'admin-onboarding-token-create',
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => [getClientIp(req)],
+  message: 'Too many onboarding token creation attempts. Please try again later.',
+})
+
 function getBlockedJobPostingTerms(values = []) {
   const combined = values
     .filter((value) => value !== undefined && value !== null)
@@ -1121,7 +1295,7 @@ app.get('/api/health', async (req, res) => {
   }
 })
 
-app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
+app.post('/api/jobseekers', publicResumeRateLimit, upload.single('resume_file'), async (req, res) => {
   try {
     const fullName = safeTrim(req.body.full_name, 255)
     const email = normalizeEmail(req.body.email)
@@ -1244,7 +1418,7 @@ app.get('/api/jobposts/:id', async (req, res) => {
   }
 })
 
-app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, res) => {
+app.post('/api/jobposts/:id/apply', publicApplyRateLimit, upload.single('resume_file'), async (req, res) => {
   try {
     await expireOpenJobs()
     const jobId = Number(req.params.id)
@@ -1387,7 +1561,7 @@ app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, re
   }
 })
 
-app.post('/api/employer-onboarding-token', requireAdminAuth, async (req, res) => {
+app.post('/api/employer-onboarding-token', adminOnboardingTokenRateLimit, requireAdminAuth, async (req, res) => {
   const connection = await pool.getConnection()
 
   try {
@@ -1529,7 +1703,7 @@ app.post('/api/employer-onboarding-token', requireAdminAuth, async (req, res) =>
   }
 })
 
-app.get('/api/employer-onboarding/validate', async (req, res) => {
+app.get('/api/employer-onboarding/validate', employerOnboardingValidateRateLimit, async (req, res) => {
   try {
     const token = safeTrim(req.query.token, 128)
 
@@ -1628,7 +1802,7 @@ app.get('/api/employer-onboarding/validate', async (req, res) => {
   }
 })
 
-app.post('/api/employer-onboarding/complete', async (req, res) => {
+app.post('/api/employer-onboarding/complete', employerOnboardingCompleteRateLimit, async (req, res) => {
   const connection = await pool.getConnection()
 
   try {
@@ -1880,7 +2054,7 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
   }
 })
 
-app.post('/api/employer-auth/login', async (req, res) => {
+app.post('/api/employer-auth/login', employerLoginRateLimit, async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email)
     const password = String(req.body.password || '')
@@ -1983,7 +2157,7 @@ app.post('/api/employer-auth/login', async (req, res) => {
   }
 })
 
-app.post('/api/employer-auth/forgot-password', async (req, res) => {
+app.post('/api/employer-auth/forgot-password', employerForgotPasswordRateLimit, async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email)
     const genericMessage = 'If that email exists, a password reset link has been sent.'
@@ -2082,7 +2256,7 @@ app.post('/api/employer-auth/forgot-password', async (req, res) => {
   }
 })
 
-app.get('/api/employer-auth/reset-password/validate', async (req, res) => {
+app.get('/api/employer-auth/reset-password/validate', employerResetPasswordValidateRateLimit, async (req, res) => {
   try {
     const token = safeTrim(req.query.token, 255)
 
@@ -2158,7 +2332,7 @@ app.get('/api/employer-auth/reset-password/validate', async (req, res) => {
   }
 })
 
-app.post('/api/employer-auth/reset-password', async (req, res) => {
+app.post('/api/employer-auth/reset-password', employerResetPasswordRateLimit, async (req, res) => {
   const connection = await pool.getConnection()
 
   try {
@@ -3619,7 +3793,7 @@ app.get('/api/jobposts', async (req, res) => {
 })
 
 
-app.get('/api/admin/session', requireAdminAuth, async (req, res) => {
+app.get('/api/admin/session', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     await expireOpenJobs()
 
@@ -3696,7 +3870,7 @@ app.get('/api/admin/session', requireAdminAuth, async (req, res) => {
   }
 })
 
-app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
+app.get('/api/admin/employers', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     await expireOpenJobs()
 
@@ -3804,7 +3978,7 @@ app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
   }
 })
 
-app.get('/api/admin/jobs', requireAdminAuth, async (req, res) => {
+app.get('/api/admin/jobs', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     await expireOpenJobs()
 
@@ -3887,7 +4061,7 @@ app.get('/api/admin/jobs', requireAdminAuth, async (req, res) => {
   }
 })
 
-app.get('/api/admin/tokens', requireAdminAuth, async (req, res) => {
+app.get('/api/admin/tokens', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     const [rows] = await pool.query(
       `
@@ -3941,7 +4115,7 @@ app.get('/api/admin/tokens', requireAdminAuth, async (req, res) => {
   }
 })
 
-app.post('/api/admin/employers/:id/approve', requireAdminAuth, async (req, res) => {
+app.post('/api/admin/employers/:id/approve', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     const employerId = Number(req.params.id)
 
@@ -3980,7 +4154,7 @@ app.post('/api/admin/employers/:id/approve', requireAdminAuth, async (req, res) 
   }
 })
 
-app.delete('/api/admin/jobs/:id', requireAdminAuth, async (req, res) => {
+app.delete('/api/admin/jobs/:id', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     const jobId = Number(req.params.id)
 
@@ -4012,7 +4186,7 @@ app.delete('/api/admin/jobs/:id', requireAdminAuth, async (req, res) => {
   }
 })
 
-app.post('/api/admin/employers/:id/deactivate', requireAdminAuth, async (req, res) => {
+app.post('/api/admin/employers/:id/deactivate', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   const connection = await pool.getConnection()
 
   try {
@@ -4064,7 +4238,7 @@ app.post('/api/admin/employers/:id/deactivate', requireAdminAuth, async (req, re
   }
 })
 
-app.post('/api/admin/employers/:id/reactivate', requireAdminAuth, async (req, res) => {
+app.post('/api/admin/employers/:id/reactivate', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     const employerId = Number(req.params.id)
 
@@ -4097,7 +4271,7 @@ app.post('/api/admin/employers/:id/reactivate', requireAdminAuth, async (req, re
   }
 })
 
-app.post('/api/admin/tokens/:id/revoke', requireAdminAuth, async (req, res) => {
+app.post('/api/admin/tokens/:id/revoke', adminApiRateLimit, requireAdminAuth, async (req, res) => {
   try {
     const tokenId = Number(req.params.id)
 
