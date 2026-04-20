@@ -48,6 +48,34 @@ const PUBLIC_EMPLOYER_PLAN_CLAIM_ENABLED = (() => {
   return /4klabs\.net/i.test(APP_BASE_URL) || /4klabs\.net/i.test(EMPLOYER_ONBOARDING_BASE_URL)
 })()
 
+const SQUARE_ACCESS_TOKEN = safeTrim(process.env.SQUARE_ACCESS_TOKEN, 255)
+const SQUARE_LOCATION_ID = safeTrim(process.env.SQUARE_LOCATION_ID || process.env.SQUARE_EMPLOYER_LOCATION_ID, 255)
+const SQUARE_WEBHOOK_SIGNATURE_KEY = safeTrim(process.env.SQUARE_WEBHOOK_SIGNATURE_KEY || process.env.SQUARE_SIGNATURE_KEY, 255)
+const SQUARE_API_BASE_URL =
+  safeTrim(process.env.SQUARE_API_BASE_URL, 255) ||
+  (parseBoolean(process.env.SQUARE_SANDBOX)
+    ? 'https://connect.squareupsandbox.com'
+    : 'https://connect.squareup.com')
+const SQUARE_EMPLOYER_PLAN_NAME =
+  safeTrim(process.env.SQUARE_EMPLOYER_PLAN_NAME, 255) ||
+  'TarboroJobs Employer Plan'
+const SQUARE_EMPLOYER_PLAN_AMOUNT_CENTS = Math.max(
+  100,
+  Number.parseInt(process.env.SQUARE_EMPLOYER_PLAN_AMOUNT_CENTS || '4900', 10) || 4900
+)
+const SQUARE_EMPLOYER_PLAN_CURRENCY =
+  safeTrim(process.env.SQUARE_EMPLOYER_PLAN_CURRENCY, 12).toUpperCase() ||
+  'USD'
+const SQUARE_SUBSCRIPTION_PLAN_ID =
+  safeTrim(
+    process.env.SQUARE_SUBSCRIPTION_PLAN_ID ||
+      process.env.SQUARE_SUBSCRIPTION_PLAN_VARIATION_ID,
+    255
+  )
+const SQUARE_WEBHOOK_NOTIFICATION_URL =
+  safeTrim(process.env.SQUARE_WEBHOOK_NOTIFICATION_URL, 2048) ||
+  (APP_BASE_URL ? `${APP_BASE_URL.replace(/\/+$/, '')}/api/square/webhook` : '')
+
 const projectRoot = path.resolve(__dirname, '..')
 const frontendDistDir = path.join(projectRoot, 'dist')
 const frontendIndexFile = path.join(frontendDistDir, 'index.html')
@@ -171,7 +199,7 @@ const upload = multer({
 
 app.disable('x-powered-by')
 app.use(cors(corsOptions))
-app.use(express.json({ limit: '2mb' }))
+app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf.toString('utf8') } }))
 app.use(express.urlencoded({ extended: true }))
 app.use('/uploads', express.static(uploadsRoot))
 
@@ -536,6 +564,436 @@ function buildEmployerPasswordResetUrl(token) {
   return `${EMPLOYER_PASSWORD_RESET_BASE_URL}${separator}page=employer-reset-password&token=${encodeURIComponent(token)}`
 }
 
+function buildEmployerPaymentSuccessUrl(checkoutRef) {
+  if (!APP_BASE_URL) return null
+
+  try {
+    const url = new URL(APP_BASE_URL)
+    url.searchParams.set('page', 'employer-payment-success')
+    url.searchParams.set('checkout_ref', checkoutRef)
+    return url.toString()
+  } catch {
+    const separator = APP_BASE_URL.includes('?') ? '&' : '?'
+    return `${APP_BASE_URL}${separator}page=employer-payment-success&checkout_ref=${encodeURIComponent(checkoutRef)}`
+  }
+}
+
+function isSquareCheckoutConfigured() {
+  return Boolean(
+    SQUARE_ACCESS_TOKEN &&
+      SQUARE_LOCATION_ID &&
+      SQUARE_WEBHOOK_SIGNATURE_KEY &&
+      SQUARE_SUBSCRIPTION_PLAN_ID &&
+      APP_BASE_URL
+  )
+}
+
+function getSquareApiHeaders() {
+  return {
+    Authorization: `Bearer ${SQUARE_ACCESS_TOKEN}`,
+    'Content-Type': 'application/json',
+    'Square-Version': '2026-01-22',
+  }
+}
+
+function parseSquareErrorMessage(data, fallback) {
+  const message = Array.isArray(data?.errors)
+    ? data.errors
+        .map((entry) => entry?.detail || entry?.code || '')
+        .filter(Boolean)
+        .join('; ')
+    : ''
+
+  return message || fallback
+}
+
+async function squareApiRequest(endpoint, options = {}) {
+  const method = options.method || 'GET'
+  const response = await fetch(`${SQUARE_API_BASE_URL}${endpoint}`, {
+    method,
+    headers: {
+      ...getSquareApiHeaders(),
+      ...(options.headers || {}),
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  })
+
+  const raw = await response.text()
+  let data = {}
+
+  if (raw) {
+    try {
+      data = JSON.parse(raw)
+    } catch {
+      data = { raw }
+    }
+  }
+
+  if (!response.ok) {
+    const error = new Error(
+      parseSquareErrorMessage(data, `Square API request failed with status ${response.status}.`)
+    )
+    error.status = response.status
+    error.data = data
+    throw error
+  }
+
+  return data
+}
+
+async function createSquareEmployerCheckoutLink({ checkoutRef, email, businessName }) {
+  if (!isSquareCheckoutConfigured()) {
+    throw new Error('Square checkout is not configured. Set the Square access token, location ID, subscription plan variation ID, and webhook signature key first.')
+  }
+
+  const redirectUrl = buildEmployerPaymentSuccessUrl(checkoutRef)
+  if (!redirectUrl) {
+    throw new Error('Employer payment success URL is not configured.')
+  }
+
+  const checkoutOptions = {
+    redirect_url: redirectUrl,
+    ask_for_shipping_address: false,
+  }
+
+  if (SQUARE_SUBSCRIPTION_PLAN_ID) {
+    checkoutOptions.subscription_plan_id = SQUARE_SUBSCRIPTION_PLAN_ID
+  }
+
+  const payload = {
+    idempotency_key: crypto.randomUUID(),
+    quick_pay: {
+      name: businessName || SQUARE_EMPLOYER_PLAN_NAME,
+      price_money: {
+        amount: SQUARE_EMPLOYER_PLAN_AMOUNT_CENTS,
+        currency: SQUARE_EMPLOYER_PLAN_CURRENCY,
+      },
+      location_id: SQUARE_LOCATION_ID,
+    },
+    checkout_options: checkoutOptions,
+    pre_populated_data: {
+      buyer_email: email,
+    },
+    payment_note: `TarboroJobs employer checkout ref:${checkoutRef}`,
+  }
+
+  const response = await squareApiRequest('/v2/online-checkout/payment-links', {
+    method: 'POST',
+    body: payload,
+  })
+
+  return {
+    idempotencyKey: payload.idempotency_key,
+    redirectUrl,
+    paymentLinkId: response?.payment_link?.id || null,
+    checkoutUrl: response?.payment_link?.url || null,
+    checkoutLongUrl: response?.payment_link?.long_url || null,
+    orderId: response?.payment_link?.order_id || null,
+  }
+}
+
+async function fetchSquarePayment(paymentId) {
+  return squareApiRequest(`/v2/payments/${encodeURIComponent(paymentId)}`)
+}
+
+function verifySquareWebhookSignature({ signatureHeader, requestBody }) {
+  if (!SQUARE_WEBHOOK_SIGNATURE_KEY || !SQUARE_WEBHOOK_NOTIFICATION_URL) {
+    return false
+  }
+
+  const hmac = crypto.createHmac('sha256', SQUARE_WEBHOOK_SIGNATURE_KEY)
+  hmac.update(`${SQUARE_WEBHOOK_NOTIFICATION_URL}${requestBody}`)
+  const digest = hmac.digest('base64')
+
+  const actual = Buffer.from(String(signatureHeader || ''), 'utf8')
+  const expected = Buffer.from(digest, 'utf8')
+
+  if (actual.length !== expected.length) {
+    return false
+  }
+
+  return crypto.timingSafeEqual(actual, expected)
+}
+
+function extractCheckoutRef(value) {
+  const normalized = safeTrim(value, 120)
+  if (!normalized) return null
+
+  const match = normalized.match(/checkout\s*ref:([a-zA-Z0-9_-]+)/i)
+  if (match?.[1]) return match[1]
+
+  if (/^tj_[a-zA-Z0-9_-]+$/.test(normalized)) {
+    return normalized
+  }
+
+  return null
+}
+
+async function getPendingCheckoutByRef(checkoutRef) {
+  const [rows] = await pool.query(
+    `
+    SELECT *
+    FROM employer_pending_checkouts
+    WHERE checkout_ref = ?
+    LIMIT 1
+    `,
+    [checkoutRef]
+  )
+
+  return rows[0] || null
+}
+
+function mapCheckoutStatus(row) {
+  if (!row) {
+    return {
+      success: false,
+      status: 'not_found',
+      error: 'Checkout session not found.',
+    }
+  }
+
+  if (row.checkout_status === 'already_onboarded') {
+    return {
+      success: true,
+      status: 'already_onboarded',
+      payment_verified: true,
+      login_url: '/?page=employer-login',
+      message: 'This employer account is already set up. Log in to continue.',
+    }
+  }
+
+  if (row.onboarding_token) {
+    return {
+      success: true,
+      status: 'ready',
+      payment_verified: true,
+      onboarding_url: buildOnboardingUrl(row.onboarding_token),
+      email_sent: !!row.email_sent,
+      message: 'Payment verified. Your onboarding link is ready.',
+    }
+  }
+
+  if (row.payment_status === 'paid') {
+    return {
+      success: true,
+      status: 'payment_verified',
+      payment_verified: true,
+      message: 'Payment verified. Finalizing your onboarding link now.',
+    }
+  }
+
+  if (['failed', 'canceled'].includes(String(row.payment_status || '').toLowerCase())) {
+    return {
+      success: true,
+      status: 'payment_failed',
+      payment_verified: false,
+      message: 'Square did not confirm a completed payment for this checkout.',
+    }
+  }
+
+  return {
+    success: true,
+    status: 'awaiting_payment_confirmation',
+    payment_verified: false,
+    message: 'We are still waiting for Square to confirm the payment.',
+  }
+}
+
+async function finalizeVerifiedEmployerCheckoutByRef(checkoutRef) {
+  if (!checkoutRef) return null
+
+  const connection = await pool.getConnection()
+  let result = null
+
+  try {
+    await connection.beginTransaction()
+
+    const [checkoutRows] = await connection.query(
+      `
+      SELECT *
+      FROM employer_pending_checkouts
+      WHERE checkout_ref = ?
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [checkoutRef]
+    )
+
+    const checkout = checkoutRows[0]
+    if (!checkout) {
+      await connection.rollback()
+      return null
+    }
+
+    if (checkout.checkout_status === 'already_onboarded') {
+      await connection.commit()
+      return checkout
+    }
+
+    if (checkout.onboarding_token) {
+      await connection.commit()
+      return checkout
+    }
+
+    if (checkout.payment_status !== 'paid') {
+      await connection.commit()
+      return checkout
+    }
+
+    const email = normalizeEmail(checkout.email)
+    const businessName = toNullableString(checkout.business_name, 255)
+
+    let employerId = null
+    const [existingEmployers] = await connection.query(
+      `
+      SELECT id, onboarding_completed
+      FROM employers
+      WHERE email = ?
+      ORDER BY id DESC
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [email]
+    )
+
+    if (existingEmployers.length > 0) {
+      const employer = existingEmployers[0]
+      employerId = employer.id
+
+      if (employer.onboarding_completed) {
+        await connection.query(
+          `
+          UPDATE employer_pending_checkouts
+          SET checkout_status = 'already_onboarded', completed_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+          `,
+          [checkout.id]
+        )
+
+        await connection.commit()
+        return {
+          ...checkout,
+          checkout_status: 'already_onboarded',
+        }
+      }
+
+      await connection.query(
+        `
+        UPDATE employers
+        SET
+          business_name = COALESCE(?, business_name),
+          square_customer_id = COALESCE(?, square_customer_id),
+          square_subscription_id = COALESCE(?, square_subscription_id),
+          subscription_status = 'active',
+          access_status = 'pending',
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        `,
+        [businessName, checkout.square_customer_id, checkout.square_subscription_id, employerId]
+      )
+    } else {
+      const [insertEmployer] = await connection.query(
+        `
+        INSERT INTO employers
+        (
+          business_name,
+          email,
+          square_customer_id,
+          square_subscription_id,
+          subscription_status,
+          access_status,
+          onboarding_completed,
+          status
+        )
+        VALUES (?, ?, ?, ?, 'active', 'pending', 0, 'new')
+        `,
+        [businessName, email, checkout.square_customer_id, checkout.square_subscription_id]
+      )
+
+      employerId = insertEmployer.insertId
+    }
+
+    await revokePendingTokensForEmployer(connection, employerId)
+
+    const token = generateToken()
+    const expiresAt = addDays(7)
+
+    const [insertToken] = await connection.query(
+      `
+      INSERT INTO employer_onboarding_tokens
+      (
+        employer_id,
+        token,
+        email,
+        square_customer_id,
+        square_subscription_id,
+        status,
+        expires_at
+      )
+      VALUES (?, ?, ?, ?, ?, 'pending', ?)
+      `,
+      [
+        employerId,
+        token,
+        email,
+        checkout.square_customer_id,
+        checkout.square_subscription_id,
+        expiresAt,
+      ]
+    )
+
+    await connection.query(
+      `
+      UPDATE employer_pending_checkouts
+      SET
+        onboarding_token_id = ?,
+        onboarding_token = ?,
+        onboarding_expires_at = ?,
+        checkout_status = 'ready',
+        completed_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `,
+      [insertToken.insertId, token, expiresAt, checkout.id]
+    )
+
+    await connection.commit()
+
+    let emailSent = false
+    try {
+      emailSent = await sendOnboardingEmail({
+        email,
+        businessName,
+        token,
+      })
+    } catch (mailError) {
+      console.error('Secure employer checkout onboarding email error:', mailError)
+    }
+
+    if (emailSent) {
+      await pool.query(
+        `UPDATE employer_pending_checkouts SET email_sent = 1 WHERE id = ?`,
+        [checkout.id]
+      )
+    }
+
+    result = {
+      ...checkout,
+      onboarding_token_id: insertToken.insertId,
+      onboarding_token: token,
+      onboarding_expires_at: expiresAt,
+      checkout_status: 'ready',
+      email_sent: emailSent ? 1 : checkout.email_sent,
+    }
+  } catch (error) {
+    await connection.rollback()
+    throw error
+  } finally {
+    connection.release()
+  }
+
+  return result
+}
+
 function getMailFrom() {
   return (
     safeTrim(process.env.MAIL_FROM) ||
@@ -773,6 +1231,46 @@ async function ensureJobSeekerApplicationColumns() {
       await pool.query(`ALTER TABLE job_seekers ${column.sql}`)
     }
   }
+}
+
+async function ensureEmployerPendingCheckoutsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS employer_pending_checkouts (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      checkout_ref VARCHAR(64) NOT NULL,
+      idempotency_key VARCHAR(64) NOT NULL,
+      email VARCHAR(255) NOT NULL,
+      business_name VARCHAR(255) NULL DEFAULT NULL,
+      plan_key VARCHAR(64) NOT NULL DEFAULT 'employer-monthly',
+      amount_cents INT NOT NULL,
+      currency VARCHAR(12) NOT NULL DEFAULT 'USD',
+      square_payment_link_id VARCHAR(255) NULL DEFAULT NULL,
+      square_order_id VARCHAR(255) NULL DEFAULT NULL,
+      square_checkout_url TEXT NULL,
+      square_checkout_long_url TEXT NULL,
+      square_payment_id VARCHAR(255) NULL DEFAULT NULL,
+      square_customer_id VARCHAR(255) NULL DEFAULT NULL,
+      square_subscription_id VARCHAR(255) NULL DEFAULT NULL,
+      square_merchant_id VARCHAR(255) NULL DEFAULT NULL,
+      square_event_id VARCHAR(255) NULL DEFAULT NULL,
+      payment_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+      checkout_status VARCHAR(32) NOT NULL DEFAULT 'created',
+      email_sent TINYINT(1) NOT NULL DEFAULT 0,
+      onboarding_token_id BIGINT UNSIGNED NULL DEFAULT NULL,
+      onboarding_token VARCHAR(255) NULL DEFAULT NULL,
+      onboarding_expires_at DATETIME NULL DEFAULT NULL,
+      paid_at DATETIME NULL DEFAULT NULL,
+      completed_at DATETIME NULL DEFAULT NULL,
+      expires_at DATETIME NULL DEFAULT NULL,
+      last_error TEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_employer_pending_checkouts_ref (checkout_ref),
+      KEY idx_employer_pending_checkouts_email (email),
+      KEY idx_employer_pending_checkouts_status (payment_status, checkout_status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
 }
 
 async function expireOpenJobs() {
@@ -1410,44 +1908,35 @@ app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, re
   }
 })
 
-app.post('/api/employer-plan/claim', async (req, res) => {
-  const connection = await pool.getConnection()
-
+app.post('/api/employer-plan/start-checkout', async (req, res) => {
   try {
-    if (!PUBLIC_EMPLOYER_PLAN_CLAIM_ENABLED) {
-      return res.status(403).json({
+    if (!isSquareCheckoutConfigured()) {
+      return res.status(503).json({
         success: false,
-        error: 'Employer payment-claim flow is not enabled on this environment.',
+        error: 'Square checkout is not configured. Set the Square access token, location ID, subscription plan variation ID, and webhook signature key first.',
       })
     }
 
-    await connection.beginTransaction()
-
     const email = normalizeEmail(req.body.email)
     const businessName = toNullableString(req.body.business_name, 255)
-    const shouldSendEmail = req.body.send_email === undefined ? true : parseBoolean(req.body.send_email)
 
     if (!email) {
-      await connection.rollback()
       return res.status(400).json({
         success: false,
-        error: 'Email is required to continue employer setup.',
+        error: 'Business email is required to start checkout.',
       })
     }
 
     if (!isValidEmail(email)) {
-      await connection.rollback()
       return res.status(400).json({
         success: false,
-        error: 'A valid email address is required.',
+        error: 'A valid business email is required.',
       })
     }
 
-    let employerId = null
-
-    const [existingEmployers] = await connection.query(
+    const [existingEmployers] = await pool.query(
       `
-      SELECT id, onboarding_completed, access_status, subscription_status
+      SELECT id, onboarding_completed
       FROM employers
       WHERE email = ?
       ORDER BY id DESC
@@ -1456,105 +1945,221 @@ app.post('/api/employer-plan/claim', async (req, res) => {
       [email]
     )
 
-    if (existingEmployers.length > 0) {
-      const existingEmployer = existingEmployers[0]
-      employerId = existingEmployer.id
-
-      if (existingEmployer.onboarding_completed) {
-        await connection.rollback()
-        return res.status(409).json({
-          success: false,
-          error: 'This employer account is already set up. Please log in or use password reset instead.',
-        })
-      }
-
-      await connection.query(
-        `
-        UPDATE employers
-        SET
-          business_name = COALESCE(?, business_name),
-          subscription_status = 'active',
-          access_status = 'pending',
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        `,
-        [businessName, employerId]
-      )
-    } else {
-      const [insertEmployer] = await connection.query(
-        `
-        INSERT INTO employers
-        (
-          business_name,
-          email,
-          subscription_status,
-          access_status,
-          onboarding_completed,
-          status
-        )
-        VALUES (?, ?, 'active', 'pending', 0, 'new')
-        `,
-        [businessName, email]
-      )
-
-      employerId = insertEmployer.insertId
+    if (existingEmployers.length > 0 && existingEmployers[0].onboarding_completed) {
+      return res.status(409).json({
+        success: false,
+        error: 'This email already belongs to an employer account. Please log in instead.',
+      })
     }
 
-    await revokePendingTokensForEmployer(connection, employerId)
+    const checkoutRef = `tj_${crypto.randomBytes(12).toString('hex')}`
+    const squareCheckout = await createSquareEmployerCheckoutLink({
+      checkoutRef,
+      email,
+      businessName,
+    })
 
-    const token = generateToken()
-    const expiresAt = addDays(7)
+    if (!squareCheckout.checkoutUrl || !squareCheckout.orderId) {
+      return res.status(500).json({
+        success: false,
+        error: 'Square did not return a valid checkout session.',
+      })
+    }
 
-    const [insertToken] = await connection.query(
+    await pool.query(
       `
-      INSERT INTO employer_onboarding_tokens
+      INSERT INTO employer_pending_checkouts
       (
-        employer_id,
-        token,
+        checkout_ref,
+        idempotency_key,
         email,
-        status,
+        business_name,
+        plan_key,
+        amount_cents,
+        currency,
+        square_payment_link_id,
+        square_order_id,
+        square_checkout_url,
+        square_checkout_long_url,
+        payment_status,
+        checkout_status,
         expires_at
       )
-      VALUES (?, ?, ?, 'pending', ?)
+      VALUES (?, ?, ?, ?, 'employer-monthly', ?, ?, ?, ?, ?, ?, 'pending', 'created', ?)
       `,
-      [employerId, token, email, expiresAt]
+      [
+        checkoutRef,
+        squareCheckout.idempotencyKey,
+        email,
+        businessName,
+        SQUARE_EMPLOYER_PLAN_AMOUNT_CENTS,
+        SQUARE_EMPLOYER_PLAN_CURRENCY,
+        squareCheckout.paymentLinkId,
+        squareCheckout.orderId,
+        squareCheckout.checkoutUrl,
+        squareCheckout.checkoutLongUrl,
+        addDays(2),
+      ]
     )
-
-    await connection.commit()
-
-    let emailSent = false
-    if (shouldSendEmail) {
-      try {
-        emailSent = await sendOnboardingEmail({
-          email,
-          businessName,
-          token,
-        })
-      } catch (mailError) {
-        console.error('Employer payment-claim onboarding email error:', mailError)
-      }
-    }
 
     res.json({
       success: true,
-      token,
-      token_id: insertToken.insertId,
-      employer_id: employerId,
-      expires_at: expiresAt,
-      onboarding_url: buildOnboardingUrl(token),
-      email_sent: emailSent,
-      message: 'Your employer setup link is ready.',
+      checkout_ref: checkoutRef,
+      checkout_url: squareCheckout.checkoutUrl,
+      checkout_long_url: squareCheckout.checkoutLongUrl,
+      redirect_url: squareCheckout.redirectUrl,
+      message: 'Secure Square checkout created successfully.',
     })
   } catch (error) {
-    await connection.rollback()
-    console.error('POST /api/employer-plan/claim error:', error)
+    console.error('POST /api/employer-plan/start-checkout error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to continue employer setup.',
+      error: error?.message || 'Failed to start secure employer checkout.',
     })
-  } finally {
-    connection.release()
   }
+})
+
+app.get('/api/employer-plan/checkout-status', async (req, res) => {
+  try {
+    const checkoutRef = safeTrim(req.query.checkout_ref, 64)
+    if (!checkoutRef) {
+      return res.status(400).json({
+        success: false,
+        error: 'checkout_ref is required.',
+      })
+    }
+
+    let checkout = await getPendingCheckoutByRef(checkoutRef)
+    if (!checkout) {
+      return res.status(404).json({
+        success: false,
+        error: 'Checkout session not found.',
+      })
+    }
+
+    if (checkout.payment_status === 'paid' && !checkout.onboarding_token) {
+      try {
+        checkout = await finalizeVerifiedEmployerCheckoutByRef(checkoutRef)
+      } catch (finalizeError) {
+        console.error('GET /api/employer-plan/checkout-status finalize error:', finalizeError)
+      }
+    }
+
+    res.json(mapCheckoutStatus(checkout))
+  } catch (error) {
+    console.error('GET /api/employer-plan/checkout-status error:', error)
+    res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to retrieve checkout status.',
+    })
+  }
+})
+
+app.post('/api/square/webhook', async (req, res) => {
+  try {
+    const signatureHeader = req.headers['x-square-hmacsha256-signature']
+    const requestBody = req.rawBody || JSON.stringify(req.body || {})
+
+    if (!verifySquareWebhookSignature({ signatureHeader, requestBody })) {
+      return res.status(403).json({
+        success: false,
+        error: 'Invalid Square webhook signature.',
+      })
+    }
+
+    const event = req.body || {}
+    const eventType = safeTrim(event.type, 120)
+
+    if (!['payment.updated', 'payment.created'].includes(eventType)) {
+      return res.status(200).json({ success: true, ignored: true })
+    }
+
+    const paymentId = safeTrim(event?.data?.id, 255)
+    if (!paymentId) {
+      return res.status(200).json({ success: true, ignored: true })
+    }
+
+    const paymentResponse = await fetchSquarePayment(paymentId)
+    const payment = paymentResponse?.payment
+    if (!payment) {
+      return res.status(200).json({ success: true, ignored: true })
+    }
+
+    let checkout = null
+
+    if (payment.order_id) {
+      const [rows] = await pool.query(
+        `
+        SELECT *
+        FROM employer_pending_checkouts
+        WHERE square_order_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        `,
+        [payment.order_id]
+      )
+      checkout = rows[0] || null
+    }
+
+    if (!checkout) {
+      const checkoutRef = extractCheckoutRef(payment.note) || extractCheckoutRef(payment.reference_id)
+      if (checkoutRef) {
+        checkout = await getPendingCheckoutByRef(checkoutRef)
+      }
+    }
+
+    if (!checkout) {
+      return res.status(200).json({ success: true, ignored: true })
+    }
+
+    const paymentStatus = String(payment.status || '').toLowerCase()
+    await pool.query(
+      `
+      UPDATE employer_pending_checkouts
+      SET
+        square_payment_id = COALESCE(?, square_payment_id),
+        square_customer_id = COALESCE(?, square_customer_id),
+        square_merchant_id = COALESCE(?, square_merchant_id),
+        square_event_id = ?,
+        payment_status = ?,
+        paid_at = CASE WHEN ? = 'completed' THEN COALESCE(paid_at, CURRENT_TIMESTAMP) ELSE paid_at END,
+        last_error = NULL
+      WHERE id = ?
+      `,
+      [
+        payment.id || null,
+        payment.customer_id || null,
+        safeTrim(event.merchant_id, 255) || null,
+        safeTrim(event.event_id, 255) || null,
+        paymentStatus === 'completed' ? 'paid' : paymentStatus || 'pending',
+        paymentStatus,
+        checkout.id,
+      ]
+    )
+
+    if (paymentStatus === 'completed') {
+      try {
+        await finalizeVerifiedEmployerCheckoutByRef(checkout.checkout_ref)
+      } catch (finalizeError) {
+        console.error('POST /api/square/webhook finalize error:', finalizeError)
+      }
+    }
+
+    res.status(200).json({ success: true })
+  } catch (error) {
+    console.error('POST /api/square/webhook error:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process Square webhook.',
+    })
+  }
+})
+
+app.post('/api/employer-plan/claim', async (req, res) => {
+  res.status(410).json({
+    success: false,
+    error: 'Direct employer claim is disabled. Use the secure Square checkout flow instead.',
+  })
 })
 
 app.post('/api/employer-onboarding-token', requireAdminAuth, async (req, res) => {
@@ -4341,6 +4946,7 @@ async function startServer() {
   await ensureEmployerPasswordResetTable()
   await ensureJobPostingComplianceColumns()
   await ensureJobSeekerApplicationColumns()
+  await ensureEmployerPendingCheckoutsTable()
   await expireOpenJobs()
 
   app.listen(PORT, () => {

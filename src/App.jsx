@@ -69,7 +69,6 @@ import AdminDashboardPage from './admin/AdminDashboardPage'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 const FILE_BASE = (import.meta.env.VITE_FILE_BASE || '').replace(/\/$/, '')
-const SQUARE_EMPLOYER_PLAN_URL = 'https://square.link/u/zmbpfpGK'
 
 const industries = [
   'All Industries',
@@ -1393,18 +1392,155 @@ function SubmitResumePage({ job, loading, error, onBack }) {
 
 
 function EmployerPaymentSuccessPage({ setCurrentPage }) {
-  const [formData, setFormData] = useState(() => {
+  const checkoutRef = useMemo(() => {
     const params = new URLSearchParams(window.location.search)
-    return {
-      business_name: params.get('business_name') || '',
-      email: params.get('email') || '',
-    }
-  })
-  const [submitting, setSubmitting] = useState(false)
-  const [message, setMessage] = useState('')
+    return params.get('checkout_ref') || ''
+  }, [])
+  const [status, setStatus] = useState('loading')
+  const [message, setMessage] = useState('Checking with Square and finalizing your employer account...')
   const [error, setError] = useState('')
   const [onboardingUrl, setOnboardingUrl] = useState('')
   const [emailSent, setEmailSent] = useState(null)
+
+  useEffect(() => {
+    let active = true
+    let timeoutId = null
+
+    async function loadStatus() {
+      if (!checkoutRef) {
+        if (!active) return
+        setStatus('error')
+        setError('Missing checkout reference. Please start the employer plan again from TarboroJobs.')
+        return
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/employer-plan/checkout-status?checkout_ref=${encodeURIComponent(checkoutRef)}`)
+        const data = await response.json()
+
+        if (!active) return
+
+        if (!response.ok || data.success === false) {
+          throw new Error(data.error || 'Unable to verify your checkout yet.')
+        }
+
+        setStatus(data.status || 'loading')
+        setMessage(data.message || 'Checking your payment status...')
+        setOnboardingUrl(data.onboarding_url || '')
+        setEmailSent(typeof data.email_sent === 'boolean' ? data.email_sent : null)
+        setError('')
+
+        if (['loading', 'awaiting_payment_confirmation', 'payment_verified'].includes(data.status)) {
+          timeoutId = window.setTimeout(loadStatus, 3000)
+        }
+      } catch (err) {
+        if (!active) return
+        setStatus('error')
+        setError(err.message || 'Unable to verify your checkout yet.')
+      }
+    }
+
+    loadStatus()
+
+    return () => {
+      active = false
+      if (timeoutId) window.clearTimeout(timeoutId)
+    }
+  }, [checkoutRef])
+
+  return (
+    <div className="mx-auto max-w-3xl">
+      <SectionHeader
+        title="Finishing Employer Setup"
+        subtitle="TarboroJobs is verifying your Square payment and preparing your secure onboarding link."
+      />
+
+      <Card title="Secure checkout handoff">
+        <div className="space-y-5">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm leading-6 text-slate-300">
+            This page does not create access on its own. It only waits for Square to confirm a completed payment and for TarboroJobs to issue your onboarding token.
+          </div>
+
+          {status === 'error' && (
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+              {error}
+            </div>
+          )}
+
+          {status !== 'error' && (
+            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
+              {message}
+            </div>
+          )}
+
+          {['loading', 'awaiting_payment_confirmation', 'payment_verified'].includes(status) && (
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm leading-6 text-slate-300">
+              Keep this tab open for a moment. If Square has already charged the payment, TarboroJobs will automatically unlock your onboarding link here as soon as the webhook is processed.
+            </div>
+          )}
+
+          {status === 'already_onboarded' && (
+            <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm leading-6 text-amber-100">
+              This business email already has an employer account. Use the button below to go to the employer login screen instead.
+            </div>
+          )}
+
+          {status === 'ready' && onboardingUrl && (
+            <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 p-4">
+              <div className="text-sm font-semibold text-emerald-200">Your secure onboarding link is ready</div>
+              <p className="mt-2 text-sm leading-6 text-emerald-100/90">
+                Square has verified the payment. TarboroJobs created your onboarding token and attached it to the button below.
+              </p>
+              {emailSent === true && (
+                <p className="mt-2 text-xs text-emerald-100/80">We also emailed this setup link to the business address used for checkout.</p>
+              )}
+              {emailSent === false && (
+                <p className="mt-2 text-xs text-amber-100/90">Email could not be sent, but this direct button will still take you into account creation.</p>
+              )}
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                <a
+                  href={onboardingUrl}
+                  className="inline-flex items-center justify-center rounded-2xl bg-emerald-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(16,185,129,0.18)] transition hover:bg-emerald-300"
+                >
+                  Open Account Creation Page
+                </a>
+              </div>
+              <p className="mt-3 break-all text-xs text-emerald-100/80">{onboardingUrl}</p>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-3 sm:flex-row">
+            {status === 'already_onboarded' ? (
+              <button
+                type="button"
+                onClick={() => setCurrentPage('employer-login')}
+                className="inline-flex items-center justify-center rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300"
+              >
+                Go to Employer Login
+              </button>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={() => setCurrentPage('list-business')}
+              className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/60 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-slate-600"
+            >
+              Back to Employer Plan
+            </button>
+          </div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function ListBusinessPage() {
+  const [formData, setFormData] = useState({
+    business_name: '',
+    email: '',
+  })
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
 
   function handleChange(event) {
     const { name, value } = event.target
@@ -1414,49 +1550,62 @@ function EmployerPaymentSuccessPage({ setCurrentPage }) {
   async function handleSubmit(event) {
     event.preventDefault()
     setSubmitting(true)
-    setMessage('')
     setError('')
-    setOnboardingUrl('')
-    setEmailSent(null)
 
     try {
-      const response = await fetch(`${API_BASE}/employer-plan/claim`, {
+      const response = await fetch(`${API_BASE}/employer-plan/start-checkout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           business_name: formData.business_name,
           email: formData.email,
-          send_email: true,
         }),
       })
 
       const data = await response.json()
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Unable to continue employer setup.')
+      if (!response.ok || !data.success || !data.checkout_url) {
+        throw new Error(data.error || 'Unable to start secure employer checkout.')
       }
 
-      setMessage(data.message || 'Your account setup link is ready.')
-      setOnboardingUrl(data.onboarding_url || '')
-      setEmailSent(Boolean(data.email_sent))
+      window.location.assign(data.checkout_url)
     } catch (err) {
-      setError(err.message || 'Unable to continue employer setup.')
-    } finally {
+      setError(err.message || 'Unable to start secure employer checkout.')
       setSubmitting(false)
     }
   }
 
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="mx-auto max-w-4xl">
       <SectionHeader
-        title="Finish Employer Setup"
-        subtitle="After checkout, continue here to receive your onboarding link and open the employer account setup page."
+        title="Join as an Employer"
+        subtitle="Start a secure Square checkout, then come right back into TarboroJobs to finish account setup."
       />
 
-      <Card title="Complete the handoff from checkout">
+      <div className="mb-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-[30px] border border-slate-800 bg-slate-900/90 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Employer access</div>
+          <p className="mt-4 text-sm leading-6 text-slate-300">
+            TarboroJobs now generates a secure, one-time Square checkout session for each employer signup. After payment is confirmed by webhook, your onboarding link is issued automatically.
+          </p>
+        </div>
+        <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">What you get</div>
+          <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
+            <li>• Business profile listing</li>
+            <li>• Employer dashboard access</li>
+            <li>• Job posting management</li>
+            <li>• Resume and candidate workflow tools</li>
+          </ul>
+        </div>
+      </div>
+
+      <Card title="Start Employer Plan">
         <div className="space-y-5">
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm leading-6 text-slate-300">
-            Enter the business email you want tied to your employer account. We will create a fresh onboarding token, email it to you, and also give you a direct continue button here.
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+            <div className="text-sm font-semibold text-white">Secure checkout first</div>
+            <p className="mt-2 text-sm leading-6 text-slate-400">
+              Enter your business email before checkout. TarboroJobs uses it to create a tracked Square session, wait for payment confirmation, and then issue your employer onboarding token.
+            </p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -1482,14 +1631,6 @@ function EmployerPaymentSuccessPage({ setCurrentPage }) {
               </Field>
             </div>
 
-            {message && (
-              <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
-                {message}
-                {emailSent === true && <div className="mt-1 text-emerald-200">We also emailed the setup link to that address.</div>}
-                {emailSent === false && <div className="mt-1 text-amber-200">Email could not be sent, but you can continue with the button below.</div>}
-              </div>
-            )}
-
             {error && (
               <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
                 {error}
@@ -1502,93 +1643,17 @@ function EmployerPaymentSuccessPage({ setCurrentPage }) {
                 disabled={submitting}
                 className="inline-flex items-center justify-center rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {submitting ? 'Preparing setup link...' : 'Continue to Account Setup'}
+                {submitting ? 'Creating secure checkout…' : 'Start Employer Plan'}
               </button>
 
               <a
-                href="/"
+                href="mailto:jobs@tarborojobs.com"
                 className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/60 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-slate-600"
               >
-                Back to Employer Plan
+                Contact TarboroJobs
               </a>
             </div>
           </form>
-
-          {onboardingUrl && (
-            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4">
-              <div className="text-sm font-semibold text-cyan-200">Your setup link is ready</div>
-              <p className="mt-2 text-sm leading-6 text-cyan-100/90">
-                Use the button below to go directly into the employer onboarding form with your token already attached.
-              </p>
-              <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-                <a
-                  href={onboardingUrl}
-                  className="inline-flex items-center justify-center rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300"
-                >
-                  Open Account Creation Page
-                </a>
-              </div>
-              <p className="mt-3 break-all text-xs text-cyan-100/80">{onboardingUrl}</p>
-            </div>
-          )}
-        </div>
-      </Card>
-    </div>
-  )
-}
-
-function ListBusinessPage() {
-  return (
-    <div className="mx-auto max-w-4xl">
-      <SectionHeader
-        title="Join as an Employer"
-        subtitle="Create your employer account, publish jobs, and manage candidates from the new Midnight Civic dashboard."
-      />
-
-      <div className="mb-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <div className="rounded-[30px] border border-slate-800 bg-slate-900/90 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Employer access</div>
-          <p className="mt-4 text-sm leading-6 text-slate-300">
-            TarboroJobs employer access is handled through onboarding. Once approved, you can manage your business profile, post jobs, and review resumes in one place.
-          </p>
-        </div>
-        <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">What you get</div>
-          <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
-            <li>• Business profile listing</li>
-            <li>• Employer dashboard access</li>
-            <li>• Job posting management</li>
-            <li>• Resume and candidate workflow tools</li>
-          </ul>
-        </div>
-      </div>
-
-      <Card title="Employer Plan">
-        <div className="space-y-5">
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-            <div className="text-sm font-semibold text-white">Built for a cleaner rollout</div>
-            <p className="mt-2 text-sm leading-6 text-slate-400">
-              After checkout, employers should be sent back to TarboroJobs to continue account setup and receive their onboarding link.
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <a
-              href={SQUARE_EMPLOYER_PLAN_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center justify-center rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300"
-            >
-              Start Employer Plan
-            </a>
-
-            <a
-              href="mailto:jobs@tarborojobs.com"
-              className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/60 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-slate-600"
-            >
-              Contact TarboroJobs
-            </a>
-          </div>
         </div>
       </Card>
     </div>
