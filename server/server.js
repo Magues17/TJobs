@@ -641,6 +641,58 @@ async function squareApiRequest(endpoint, options = {}) {
   return data
 }
 
+let cachedSquareSubscriptionPlanVariationId = null
+
+async function resolveSquareSubscriptionPlanVariationId() {
+  if (cachedSquareSubscriptionPlanVariationId) {
+    return cachedSquareSubscriptionPlanVariationId
+  }
+
+  const configuredId = SQUARE_SUBSCRIPTION_PLAN_ID
+  if (!configuredId) {
+    throw new Error('SQUARE_SUBSCRIPTION_PLAN_ID is not configured.')
+  }
+
+  let object
+  try {
+    const response = await squareApiRequest(
+      `/v2/catalog/object/${encodeURIComponent(configuredId)}`
+    )
+    object = response?.object
+  } catch (error) {
+    const detail = error?.data?.errors?.[0]?.detail || error.message
+    throw new Error(
+      `Square could not find catalog object "${configuredId}". This usually means the ID belongs to a different Square environment (sandbox vs production) than the configured access token, the plan was deleted, or the ID is wrong. Square said: ${detail}`
+    )
+  }
+
+  if (!object) {
+    throw new Error(`Square returned no catalog object for ID "${configuredId}".`)
+  }
+
+  if (object.type === 'SUBSCRIPTION_PLAN_VARIATION') {
+    cachedSquareSubscriptionPlanVariationId = object.id
+    return cachedSquareSubscriptionPlanVariationId
+  }
+
+  if (object.type === 'SUBSCRIPTION_PLAN') {
+    const variations =
+      object.subscription_plan_data?.subscription_plan_variations || []
+    const firstUsable = variations.find((variation) => variation?.id) || null
+    if (!firstUsable?.id) {
+      throw new Error(
+        `Square subscription plan "${configuredId}" has no plan variations. Add at least one priced variation to the plan in the Square Dashboard before configuring checkout.`
+      )
+    }
+    cachedSquareSubscriptionPlanVariationId = firstUsable.id
+    return cachedSquareSubscriptionPlanVariationId
+  }
+
+  throw new Error(
+    `Square catalog object "${configuredId}" has type "${object.type}", which is not usable for subscription checkout. Set SQUARE_SUBSCRIPTION_PLAN_ID to a SUBSCRIPTION_PLAN or SUBSCRIPTION_PLAN_VARIATION ID.`
+  )
+}
+
 async function createSquareEmployerCheckoutLink({ checkoutRef, email, businessName }) {
   if (!isSquareCheckoutConfigured()) {
     throw new Error('Square checkout is not configured. Set the Square access token, location ID, subscription plan variation ID, and webhook signature key first.')
@@ -657,7 +709,8 @@ async function createSquareEmployerCheckoutLink({ checkoutRef, email, businessNa
   }
 
   if (SQUARE_SUBSCRIPTION_PLAN_ID) {
-    checkoutOptions.subscription_plan_id = SQUARE_SUBSCRIPTION_PLAN_ID
+    checkoutOptions.subscription_plan_id =
+      await resolveSquareSubscriptionPlanVariationId()
   }
 
   const payload = {
