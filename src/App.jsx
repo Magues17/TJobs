@@ -397,7 +397,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onL
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-5">
           <button
             onClick={() => handleNavClick('jobs')}
-            className="min-w-0 flex items-center gap-3 text-left"
+            className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden text-left"
           >
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-300 shadow-[0_12px_30px_rgba(34,211,238,0.16)]">
               <MapPin className="h-5 w-5" />
@@ -412,7 +412,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onL
             </div>
           </button>
 
-          <div className="hidden items-center gap-2 md:flex">
+          <div className="hidden shrink-0 items-center gap-2 md:flex">
             <nav className="flex items-center gap-2">
               {navItems.map((item) => {
                 const Icon = item.icon
@@ -451,7 +451,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onL
             aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
             aria-expanded={mobileMenuOpen}
             onClick={() => setMobileMenuOpen((prev) => !prev)}
-            className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/85 text-slate-300 shadow-sm transition hover:border-slate-600 hover:text-white md:hidden"
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/85 text-slate-300 shadow-sm transition hover:border-slate-600 hover:text-white md:hidden"
           >
             {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
