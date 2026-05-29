@@ -87,6 +87,11 @@ const RESUME_CHECKER_PRODUCT_NAME =
   safeTrim(process.env.RESUME_CHECKER_PRODUCT_NAME, 255) ||
   'TarboroJobs Resume Checker - Full Report'
 const RESUME_CHECKER_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+// LOCAL TESTING ONLY. When this env var is truthy, the create-checkout
+// endpoint flips the resume_checks row to paid in-process and returns a
+// same-origin URL that leads straight to the paid report - bypassing
+// Square entirely. Never set this in staging or production.
+const RESUME_CHECKER_DEV_BYPASS = parseBoolean(process.env.RESUME_CHECKER_DEV_BYPASS)
 
 const projectRoot = path.resolve(__dirname, '..')
 const frontendDistDir = path.join(projectRoot, 'dist')
@@ -2582,6 +2587,28 @@ app.post('/api/resume-checker/create-checkout', async (req, res) => {
         success: true,
         alreadyPaid: true,
         reportUrl: buildResumeReportUrl(publicToken),
+      })
+    }
+
+    // Dev bypass: flip to paid in-process and short-circuit Square. Only
+    // active when RESUME_CHECKER_DEV_BYPASS=1, which should only be set
+    // when you are running the server on a developer workstation.
+    if (RESUME_CHECKER_DEV_BYPASS) {
+      await pool.query(
+        `UPDATE resume_checks
+         SET payment_status = 'paid',
+             paid_at = CURRENT_TIMESTAMP,
+             square_payment_id = COALESCE(square_payment_id, 'dev-bypass')
+         WHERE id = ?`,
+        [row.id]
+      )
+      const reportUrl = buildResumeReportUrl(publicToken)
+      console.warn(`[resume-checker] DEV BYPASS - marked ${publicToken} as paid without Square`)
+      return res.json({
+        success: true,
+        devBypass: true,
+        checkoutUrl: reportUrl,
+        reportUrl,
       })
     }
 
