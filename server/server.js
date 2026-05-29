@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken'
 import nodemailer from 'nodemailer'
 import { fileURLToPath } from 'url'
 import pool from './db.js'
+import { analyzeResume, previewFromFullReport } from './resumeAnalyzer.js'
 
 dotenv.config()
 
@@ -75,6 +76,17 @@ const SQUARE_SUBSCRIPTION_PLAN_ID =
 const SQUARE_WEBHOOK_NOTIFICATION_URL =
   safeTrim(process.env.SQUARE_WEBHOOK_NOTIFICATION_URL, 2048) ||
   (APP_BASE_URL ? `${APP_BASE_URL.replace(/\/+$/, '')}/api/square/webhook` : '')
+
+const RESUME_CHECKER_PRICE_CENTS = Math.max(
+  100,
+  Number.parseInt(process.env.RESUME_CHECKER_PRICE_CENTS || '999', 10) || 999
+)
+const RESUME_CHECKER_PRICE_CURRENCY =
+  safeTrim(process.env.RESUME_CHECKER_PRICE_CURRENCY, 12).toUpperCase() || 'USD'
+const RESUME_CHECKER_PRODUCT_NAME =
+  safeTrim(process.env.RESUME_CHECKER_PRODUCT_NAME, 255) ||
+  'TarboroJobs Resume Checker - Full Report'
+const RESUME_CHECKER_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
 const projectRoot = path.resolve(__dirname, '..')
 const frontendDistDir = path.join(projectRoot, 'dist')
@@ -176,6 +188,45 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${base}${ext}`)
   },
 })
+
+const resumeCheckerUpload = multer({
+  storage,
+  limits: {
+    fileSize: RESUME_CHECKER_MAX_UPLOAD_BYTES,
+    files: 1,
+  },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase()
+    const mime = String(file.mimetype || '').toLowerCase()
+    const isPdf = ext === '.pdf' && (mime.includes('pdf') || mime === 'application/octet-stream')
+
+    if (!isPdf) {
+      cb(new Error('Only PDF resume files are allowed.'))
+      return
+    }
+    cb(null, true)
+  },
+})
+
+// Simple in-memory rate limiter for the resume checker upload endpoint.
+// Not distributed - good enough for a single-instance MVP behind Hostinger.
+const resumeCheckerRateBuckets = new Map()
+const RESUME_CHECKER_RATE_WINDOW_MS = 10 * 60 * 1000 // 10 minutes
+const RESUME_CHECKER_RATE_MAX = 8 // 8 uploads per IP per window
+
+function consumeResumeCheckerRate(ip) {
+  if (!ip) return true
+  const now = Date.now()
+  const bucket = resumeCheckerRateBuckets.get(ip) || []
+  const fresh = bucket.filter((stamp) => now - stamp < RESUME_CHECKER_RATE_WINDOW_MS)
+  if (fresh.length >= RESUME_CHECKER_RATE_MAX) {
+    resumeCheckerRateBuckets.set(ip, fresh)
+    return false
+  }
+  fresh.push(now)
+  resumeCheckerRateBuckets.set(ip, fresh)
+  return true
+}
 
 const upload = multer({
   storage,
@@ -1286,6 +1337,38 @@ async function ensureJobSeekerApplicationColumns() {
   }
 }
 
+async function ensureResumeChecksTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS resume_checks (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      public_token VARCHAR(128) NOT NULL,
+      email VARCHAR(255) NULL DEFAULT NULL,
+      full_name VARCHAR(255) NULL DEFAULT NULL,
+      target_job_title VARCHAR(255) NULL DEFAULT NULL,
+      job_post_id INT NULL DEFAULT NULL,
+      original_filename VARCHAR(255) NULL DEFAULT NULL,
+      extracted_text MEDIUMTEXT NULL,
+      preview_score INT NULL DEFAULT NULL,
+      full_score INT NULL DEFAULT NULL,
+      preview_report JSON NULL,
+      full_report JSON NULL,
+      payment_status ENUM('free_preview','pending','paid','failed') NOT NULL DEFAULT 'free_preview',
+      square_payment_id VARCHAR(255) NULL DEFAULT NULL,
+      square_payment_link_id VARCHAR(255) NULL DEFAULT NULL,
+      square_order_id VARCHAR(255) NULL DEFAULT NULL,
+      square_checkout_url TEXT NULL,
+      paid_at DATETIME NULL DEFAULT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_resume_checks_public_token (public_token),
+      KEY idx_resume_checks_email (email),
+      KEY idx_resume_checks_status (payment_status),
+      KEY idx_resume_checks_order (square_order_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+}
+
 async function ensureEmployerPendingCheckoutsTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS employer_pending_checkouts (
@@ -2138,6 +2221,18 @@ app.post('/api/square/webhook', async (req, res) => {
       return res.status(200).json({ success: true, ignored: true })
     }
 
+    // Resume checker webhook routing. Resume check checkouts encode a ref
+    // of the form "rc_<token>" in the payment note. We look that up first
+    // and short-circuit so it never touches the employer checkout flow.
+    const resumeCheckerHandled = await tryHandleResumeCheckerPayment({
+      payment,
+      eventId: safeTrim(event.event_id, 255),
+      merchantId: safeTrim(event.merchant_id, 255),
+    })
+    if (resumeCheckerHandled) {
+      return res.status(200).json({ success: true, type: 'resume_check' })
+    }
+
     let checkout = null
 
     if (payment.order_id) {
@@ -2204,6 +2299,360 @@ app.post('/api/square/webhook', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to process Square webhook.',
+    })
+  }
+})
+
+// -----------------------------------------------------------------------------
+// Resume checker
+// -----------------------------------------------------------------------------
+
+function generateResumeCheckerToken() {
+  // 24 random bytes → 32 url-safe chars. Used as the public_token in URLs.
+  return `rc_${crypto.randomBytes(18).toString('base64url')}`
+}
+
+function buildResumeReportUrl(publicToken) {
+  if (!APP_BASE_URL) return null
+  const base = APP_BASE_URL.replace(/\/+$/, '')
+  return `${base}/?page=resume-report&token=${encodeURIComponent(publicToken)}`
+}
+
+async function findResumeCheckByToken(publicToken) {
+  if (!publicToken) return null
+  const [rows] = await pool.query(
+    `SELECT * FROM resume_checks WHERE public_token = ? LIMIT 1`,
+    [publicToken]
+  )
+  return rows[0] || null
+}
+
+async function findResumeCheckByOrderId(orderId) {
+  if (!orderId) return null
+  const [rows] = await pool.query(
+    `SELECT * FROM resume_checks WHERE square_order_id = ? LIMIT 1`,
+    [orderId]
+  )
+  return rows[0] || null
+}
+
+async function createSquareResumeCheckerCheckoutLink({ publicToken, email }) {
+  if (!SQUARE_ACCESS_TOKEN || !SQUARE_LOCATION_ID || !APP_BASE_URL) {
+    throw new Error('Square checkout is not configured for the resume checker.')
+  }
+
+  const redirectUrl = buildResumeReportUrl(publicToken)
+  if (!redirectUrl) {
+    throw new Error('Resume report URL is not configured.')
+  }
+
+  const payload = {
+    idempotency_key: crypto.randomUUID(),
+    quick_pay: {
+      name: RESUME_CHECKER_PRODUCT_NAME,
+      price_money: {
+        amount: RESUME_CHECKER_PRICE_CENTS,
+        currency: RESUME_CHECKER_PRICE_CURRENCY,
+      },
+      location_id: SQUARE_LOCATION_ID,
+    },
+    checkout_options: {
+      redirect_url: redirectUrl,
+      ask_for_shipping_address: false,
+    },
+    pre_populated_data: email ? { buyer_email: email } : undefined,
+    payment_note: `TarboroJobs resume check ref:${publicToken}`,
+  }
+
+  const response = await squareApiRequest('/v2/online-checkout/payment-links', {
+    method: 'POST',
+    body: payload,
+  })
+
+  return {
+    paymentLinkId: response?.payment_link?.id || null,
+    checkoutUrl: response?.payment_link?.url || null,
+    orderId: response?.payment_link?.order_id || null,
+  }
+}
+
+async function tryHandleResumeCheckerPayment({ payment, eventId, merchantId }) {
+  if (!payment) return false
+
+  let row = null
+  if (payment.order_id) {
+    row = await findResumeCheckByOrderId(payment.order_id)
+  }
+  if (!row) {
+    const ref = extractCheckoutRef(payment.note) || extractCheckoutRef(payment.reference_id)
+    if (ref && ref.startsWith('rc_')) {
+      row = await findResumeCheckByToken(ref)
+    }
+  }
+  if (!row) return false
+
+  const paymentStatus = String(payment.status || '').toLowerCase()
+  const nextStatus = paymentStatus === 'completed' ? 'paid' : (paymentStatus === 'failed' ? 'failed' : 'pending')
+
+  await pool.query(
+    `
+    UPDATE resume_checks
+    SET
+      square_payment_id = COALESCE(?, square_payment_id),
+      square_order_id = COALESCE(?, square_order_id),
+      payment_status = ?,
+      paid_at = CASE WHEN ? = 'completed' THEN COALESCE(paid_at, CURRENT_TIMESTAMP) ELSE paid_at END
+    WHERE id = ?
+    `,
+    [
+      payment.id || null,
+      payment.order_id || null,
+      nextStatus,
+      paymentStatus,
+      row.id,
+    ]
+  )
+
+  // Touch merchant/event ids in logs only - we don't store them on resume_checks
+  // for the MVP. If you later add an audit table, plug it in here.
+  if (eventId || merchantId) {
+    // intentionally noop - reserved for future audit logging
+  }
+
+  return true
+}
+
+function parseReportJson(value) {
+  if (!value) return null
+  if (typeof value === 'object') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+// POST /api/resume-checker/preview
+// Accept a PDF upload, parse it, run the rule-based analyzer, store the
+// preview + full report, and return the preview shape + the public token.
+app.post(
+  '/api/resume-checker/preview',
+  resumeCheckerUpload.single('resume'),
+  async (req, res) => {
+    let savedFilePath = null
+    try {
+      // Rate limit per requester IP.
+      const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()
+      if (!consumeResumeCheckerRate(ip)) {
+        if (req.file?.path) {
+          try { await fs.promises.unlink(req.file.path) } catch {}
+        }
+        return res.status(429).json({
+          success: false,
+          error: 'Too many uploads in a short window. Please try again later.',
+        })
+      }
+
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'A PDF resume is required.',
+        })
+      }
+
+      savedFilePath = req.file.path
+
+      const consent = parseBoolean(req.body.consent)
+      if (!consent) {
+        return res.status(400).json({
+          success: false,
+          error: 'You must agree to the consent statement before submitting your resume.',
+        })
+      }
+
+      const email = normalizeEmail(req.body.email)
+      const fullName = toNullableString(req.body.fullName, 255)
+      const targetJobTitle = toNullableString(req.body.targetJobTitle, 255)
+      const jobDescription = safeTrim(req.body.jobDescription, 8000)
+      const jobPostIdRaw = safeTrim(req.body.jobPostId, 24)
+      const jobPostId = jobPostIdRaw && /^\d+$/.test(jobPostIdRaw) ? Number(jobPostIdRaw) : null
+
+      if (email && !isValidEmail(email)) {
+        return res.status(400).json({
+          success: false,
+          error: 'A valid email address is required.',
+        })
+      }
+
+      const extractedText = await extractPdfTextFromFile(savedFilePath)
+      if (!extractedText || extractedText.length < 80) {
+        return res.status(400).json({
+          success: false,
+          error: 'We could not read meaningful text from your PDF. If your resume is scanned or image-based, please export it as a text-based PDF and try again.',
+        })
+      }
+
+      const fullReport = analyzeResume(extractedText, {
+        targetJobTitle,
+        jobDescription,
+      })
+      const preview = previewFromFullReport(fullReport)
+
+      const publicToken = generateResumeCheckerToken()
+
+      await pool.query(
+        `
+        INSERT INTO resume_checks
+        (
+          public_token,
+          email,
+          full_name,
+          target_job_title,
+          job_post_id,
+          original_filename,
+          extracted_text,
+          preview_score,
+          full_score,
+          preview_report,
+          full_report,
+          payment_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'free_preview')
+        `,
+        [
+          publicToken,
+          email || null,
+          fullName,
+          targetJobTitle,
+          jobPostId,
+          safeTrim(req.file.originalname, 255) || null,
+          extractedText, // store text for full-report regeneration on payment
+          preview.overallScore,
+          fullReport.overallScore,
+          JSON.stringify(preview),
+          JSON.stringify(fullReport),
+        ]
+      )
+
+      // Delete the uploaded PDF - we keep only the extracted text per the
+      // privacy section of the spec.
+      try { await fs.promises.unlink(savedFilePath) } catch {}
+      savedFilePath = null
+
+      return res.json({
+        success: true,
+        publicToken,
+        preview,
+      })
+    } catch (error) {
+      console.error('POST /api/resume-checker/preview error:', error)
+      if (savedFilePath) {
+        try { await fs.promises.unlink(savedFilePath) } catch {}
+      }
+      return res.status(500).json({
+        success: false,
+        error: error?.message || 'Failed to analyze resume.',
+      })
+    }
+  }
+)
+
+// POST /api/resume-checker/create-checkout
+// Returns a Square hosted-checkout URL the user can be redirected to to pay
+// for the full report. We do NOT flip the resume_check to paid here - that
+// only happens via the webhook.
+app.post('/api/resume-checker/create-checkout', async (req, res) => {
+  try {
+    const publicToken = safeTrim(req.body?.publicToken, 128)
+    if (!publicToken) {
+      return res.status(400).json({ success: false, error: 'publicToken is required.' })
+    }
+
+    const row = await findResumeCheckByToken(publicToken)
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Resume check not found.' })
+    }
+
+    if (row.payment_status === 'paid') {
+      return res.json({
+        success: true,
+        alreadyPaid: true,
+        reportUrl: buildResumeReportUrl(publicToken),
+      })
+    }
+
+    const { paymentLinkId, checkoutUrl, orderId } = await createSquareResumeCheckerCheckoutLink({
+      publicToken,
+      email: row.email || undefined,
+    })
+
+    await pool.query(
+      `
+      UPDATE resume_checks
+      SET
+        payment_status = 'pending',
+        square_payment_link_id = ?,
+        square_order_id = ?,
+        square_checkout_url = ?
+      WHERE id = ?
+      `,
+      [paymentLinkId, orderId, checkoutUrl, row.id]
+    )
+
+    return res.json({
+      success: true,
+      checkoutUrl,
+    })
+  } catch (error) {
+    console.error('POST /api/resume-checker/create-checkout error:', error)
+    return res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to create checkout.',
+    })
+  }
+})
+
+// GET /api/resume-checker/report/:publicToken
+// Returns the preview shape when unpaid, the full report when paid. The
+// frontend never decides "paid" - only this endpoint does.
+app.get('/api/resume-checker/report/:publicToken', async (req, res) => {
+  try {
+    const publicToken = safeTrim(req.params.publicToken, 128)
+    if (!publicToken) {
+      return res.status(400).json({ success: false, error: 'publicToken is required.' })
+    }
+
+    const row = await findResumeCheckByToken(publicToken)
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Resume check not found.' })
+    }
+
+    const preview = parseReportJson(row.preview_report)
+    if (row.payment_status === 'paid') {
+      const fullReport = parseReportJson(row.full_report)
+      return res.json({
+        success: true,
+        paid: true,
+        preview,
+        fullReport,
+        targetJobTitle: row.target_job_title || null,
+        createdAt: row.created_at,
+      })
+    }
+
+    return res.json({
+      success: true,
+      paid: false,
+      preview,
+      paymentStatus: row.payment_status,
+      targetJobTitle: row.target_job_title || null,
+      createdAt: row.created_at,
+    })
+  } catch (error) {
+    console.error('GET /api/resume-checker/report error:', error)
+    return res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to load resume report.',
     })
   }
 })
@@ -5000,6 +5449,7 @@ async function startServer() {
   await ensureJobPostingComplianceColumns()
   await ensureJobSeekerApplicationColumns()
   await ensureEmployerPendingCheckoutsTable()
+  await ensureResumeChecksTable()
   await expireOpenJobs()
 
   app.listen(PORT, () => {
