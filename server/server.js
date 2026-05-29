@@ -2496,10 +2496,13 @@ app.post(
         targetJobTitle,
         jobDescription,
       })
-      const preview = previewFromFullReport(fullReport)
 
       const publicToken = generateResumeCheckerToken()
 
+      // We keep preview_report null on purpose - the product no longer has
+      // a free preview tier. The full report is computed up front so it can
+      // be revealed instantly after payment, but it stays sealed behind
+      // payment_status='paid' on both the DB row and every API response.
       await pool.query(
         `
         INSERT INTO resume_checks
@@ -2511,13 +2514,11 @@ app.post(
           job_post_id,
           original_filename,
           extracted_text,
-          preview_score,
           full_score,
-          preview_report,
           full_report,
           payment_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'free_preview')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'free_preview')
         `,
         [
           publicToken,
@@ -2526,10 +2527,8 @@ app.post(
           targetJobTitle,
           jobPostId,
           safeTrim(req.file.originalname, 255) || null,
-          extractedText, // store text for full-report regeneration on payment
-          preview.overallScore,
+          extractedText,
           fullReport.overallScore,
-          JSON.stringify(preview),
           JSON.stringify(fullReport),
         ]
       )
@@ -2539,10 +2538,15 @@ app.post(
       try { await fs.promises.unlink(savedFilePath) } catch {}
       savedFilePath = null
 
+      // Intentionally NO score/strengths/problems in the response. The score
+      // is the paid product.
       return res.json({
         success: true,
         publicToken,
-        preview,
+        ready: true,
+        priceCents: RESUME_CHECKER_PRICE_CENTS,
+        currency: RESUME_CHECKER_PRICE_CURRENCY,
+        message: 'Your resume is analyzed and ready. Unlock your score to see the full report.',
       })
     } catch (error) {
       console.error('POST /api/resume-checker/preview error:', error)
@@ -2627,24 +2631,26 @@ app.get('/api/resume-checker/report/:publicToken', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Resume check not found.' })
     }
 
-    const preview = parseReportJson(row.preview_report)
     if (row.payment_status === 'paid') {
       const fullReport = parseReportJson(row.full_report)
       return res.json({
         success: true,
         paid: true,
-        preview,
         fullReport,
         targetJobTitle: row.target_job_title || null,
         createdAt: row.created_at,
       })
     }
 
+    // Unpaid responses intentionally expose zero scoring data. The score is
+    // the paid product, so the client gets only "your resume is on file,
+    // here is the unlock price."
     return res.json({
       success: true,
       paid: false,
-      preview,
       paymentStatus: row.payment_status,
+      priceCents: RESUME_CHECKER_PRICE_CENTS,
+      currency: RESUME_CHECKER_PRICE_CURRENCY,
       targetJobTitle: row.target_job_title || null,
       createdAt: row.created_at,
     })

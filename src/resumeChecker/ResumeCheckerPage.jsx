@@ -1,18 +1,19 @@
 // TarboroJobs Resume Checker - public, single-page entry point.
 //
-// Flow:
+// Flow (paywalled - no free preview):
 //   1. User lands on /?page=resume-checker (or /?page=resume-report&token=...)
 //   2. They upload a PDF + optional target job + optional JD
-//   3. We POST to /api/resume-checker/preview, get back a publicToken + preview
-//   4. We show the preview + a "Get Full Report" button that calls
-//      /api/resume-checker/create-checkout and redirects to Square
-//   5. After Square redirects them back with the token, we GET the report.
-//      If paid, we render the full report. If not yet paid, we keep polling
-//      gently so the post-payment race resolves on its own.
+//   3. We POST to /api/resume-checker/preview - server parses, scores, and
+//      stores the FULL report internally but returns ONLY a publicToken.
+//      No score, no strengths, no problems leak to the client until payment.
+//   4. We show an unlock CTA. Clicking it calls
+//      /api/resume-checker/create-checkout and redirects to Square.
+//   5. After Square redirects back with the token, we GET the report. The
+//      server returns the full report only when payment_status='paid'.
+//      We poll gently for ~2 minutes to bridge the webhook gap.
 //
 // All sub-components are local to this file so the feature is self-contained
-// and easy to remove or extract later. The component is intentionally one
-// reasonably-sized file rather than ten 30-line ones.
+// and easy to remove or extract later.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -134,7 +135,7 @@ function BulletList({ items, icon: Icon, tone }) {
 
 // ---------- Upload form ----------------------------------------------------
 
-function ResumeUploadForm({ onPreviewReady }) {
+function ResumeUploadForm({ onUploadReady }) {
   const fileInputRef = useRef(null)
   const [file, setFile] = useState(null)
   const [fullName, setFullName] = useState('')
@@ -197,7 +198,11 @@ function ResumeUploadForm({ onPreviewReady }) {
       if (!response.ok || !data?.success) {
         throw new Error(data?.error || 'Could not analyze your resume.')
       }
-      onPreviewReady({ publicToken: data.publicToken, preview: data.preview })
+      onUploadReady({
+        publicToken: data.publicToken,
+        priceCents: data.priceCents,
+        currency: data.currency,
+      })
     } catch (err) {
       setError(err?.message || 'Could not analyze your resume.')
     } finally {
@@ -290,59 +295,79 @@ function ResumeUploadForm({ onPreviewReady }) {
         <div className="flex flex-wrap items-center gap-3 pt-2">
           <PrimaryButton type="submit" loading={submitting}>
             <Upload className="h-4 w-4" />
-            {submitting ? 'Analyzing...' : 'Get my preview score'}
+            {submitting ? 'Analyzing...' : 'Analyze my resume'}
           </PrimaryButton>
-          <span className="text-xs text-slate-500">Free. Pay only if you want the full report.</span>
+          <span className="text-xs text-slate-500">Payment unlocks your score and full report.</span>
         </div>
       </form>
     </PanelCard>
   )
 }
 
-// ---------- Preview + paid unlock ------------------------------------------
+// ---------- Paywall (no score shown until paid) ----------------------------
 
-function ResumePreviewCard({ preview, onUnlock, unlocking }) {
-  if (!preview) return null
+function formatPrice(priceCents, currency) {
+  const cents = Number.isFinite(priceCents) ? priceCents : 999
+  const dollars = (cents / 100).toFixed(2)
+  if ((currency || 'USD').toUpperCase() === 'USD') return `$${dollars}`
+  return `${dollars} ${currency}`
+}
+
+function PaywallCard({ priceCents, currency, onUnlock, unlocking, headline, subhead }) {
+  const priceLabel = formatPrice(priceCents, currency)
   return (
     <PanelCard className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <ResumeScoreBadge score={preview.overallScore} label={preview.label} />
-        <div className="text-right text-xs text-slate-500">Preview only - unlock the full report below</div>
-      </div>
-
-      {preview.summary ? (
-        <p className="text-sm text-slate-300">{preview.summary}</p>
-      ) : null}
-
-      <div className="grid gap-5 md:grid-cols-2">
-        <div>
-          <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300">Top strengths</div>
-          <BulletList items={preview.strengths} icon={CheckCircle2} tone="good" />
+        <div className="inline-flex items-center gap-3 rounded-2xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-200">
+          <CheckCircle2 className="h-5 w-5 text-emerald-300" />
+          <span className="font-semibold">Your resume is analyzed and ready.</span>
         </div>
-        <div>
-          <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-rose-300">Top problems</div>
-          <BulletList items={preview.problems} icon={AlertCircle} tone="bad" />
+        <div className="inline-flex items-center gap-2 text-xs text-slate-400">
+          <Lock className="h-4 w-4 text-cyan-300" /> Score & report unlock after payment
         </div>
       </div>
 
       <div className="rounded-[24px] border border-cyan-400/30 bg-cyan-400/10 p-5">
-        <div className="flex flex-wrap items-center gap-3">
-          <Lock className="h-5 w-5 text-cyan-300" />
-          <div>
-            <div className="text-sm font-semibold text-white">Unlock the full report for $9.99</div>
-            <div className="text-xs text-slate-300">
-              Includes ATS analysis, keyword match, bullet rewrites, role-specific advice, and a final checklist.
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-xl">
+            <div className="text-lg font-semibold text-white">
+              {headline || `Unlock your resume score for ${priceLabel}`}
+            </div>
+            <div className="mt-1 text-sm text-slate-300">
+              {subhead || 'You get the full report - score out of 100, ATS readability, keyword match, experience relevance, formatting and grammar reviews, suggested bullet rewrites, and a final action checklist. One-time payment.'}
             </div>
           </div>
+          <div className="text-right">
+            <div className="text-3xl font-bold text-white">{priceLabel}</div>
+            <div className="text-xs text-slate-400">one-time</div>
+          </div>
         </div>
-        <div className="mt-4 flex flex-wrap items-center gap-3">
+        <div className="mt-5 flex flex-wrap items-center gap-3">
           <PrimaryButton type="button" onClick={onUnlock} loading={unlocking}>
             <Sparkles className="h-4 w-4" />
-            Get full report
+            Unlock my score
           </PrimaryButton>
-          <span className="text-xs text-slate-400">One-time payment via Square.</span>
+          <span className="text-xs text-slate-400">Secure checkout via Square.</span>
         </div>
       </div>
+
+      <ul className="grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
+        {[
+          'Overall resume score out of 100',
+          'ATS readability check',
+          'Keyword match vs. the target role',
+          'Experience relevance to the job',
+          'Formatting & grammar review',
+          'Suggested bullet rewrites',
+          'Role-specific advice',
+          'Final action checklist',
+        ].map((item) => (
+          <li key={item} className="flex items-start gap-2">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
     </PanelCard>
   )
 }
@@ -489,14 +514,19 @@ function getQueryParam(name) {
 }
 
 export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
-  // `mode` is one of: 'upload' | 'preview' | 'report'
+  // `mode` is one of: 'upload' | 'unlock' | 'report'
+  //   upload: collecting the PDF and details from the user
+  //   unlock: server has the resume; user must pay to see the score
+  //   report: viewing by /?page=resume-report&token=... - server decides
+  //           whether to return paywall data or the full paid report
   const initialToken = getQueryParam('token')
   const initialPage = getQueryParam('page')
   const startMode = initialMode === 'report' || (initialPage === 'resume-report' && initialToken) ? 'report' : 'upload'
 
   const [mode, setMode] = useState(startMode)
   const [publicToken, setPublicToken] = useState(initialToken || '')
-  const [preview, setPreview] = useState(null)
+  const [priceCents, setPriceCents] = useState(999)
+  const [currency, setCurrency] = useState('USD')
   const [fullReport, setFullReport] = useState(null)
   const [paid, setPaid] = useState(false)
   const [reportTargetJobTitle, setReportTargetJobTitle] = useState('')
@@ -505,7 +535,8 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
   const [error, setError] = useState('')
 
   // Poll the report endpoint when we have a token but haven't unlocked yet -
-  // covers the gap between Square redirect and webhook firing.
+  // covers the gap between Square redirect and webhook firing. The endpoint
+  // never returns score data to an unpaid client.
   useEffect(() => {
     if (mode !== 'report' || !publicToken || paid) return undefined
     let cancelled = false
@@ -520,8 +551,9 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
         if (!response.ok || !data?.success) {
           throw new Error(data?.error || 'Could not load this report.')
         }
-        setPreview(data.preview || null)
         setReportTargetJobTitle(data.targetJobTitle || '')
+        if (typeof data.priceCents === 'number') setPriceCents(data.priceCents)
+        if (data.currency) setCurrency(data.currency)
         if (data.paid) {
           setPaid(true)
           setFullReport(data.fullReport || null)
@@ -582,11 +614,13 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
     }
   }
 
-  function handlePreviewReady({ publicToken: token, preview: previewPayload }) {
+  function handleUploadReady({ publicToken: token, priceCents: nextPriceCents, currency: nextCurrency }) {
     setPublicToken(token)
-    setPreview(previewPayload)
-    setMode('preview')
-    // Update the URL so the user can bookmark / refresh and still get their preview-or-paid report.
+    if (typeof nextPriceCents === 'number') setPriceCents(nextPriceCents)
+    if (nextCurrency) setCurrency(nextCurrency)
+    setMode('unlock')
+    // Update the URL so the user can bookmark / refresh and resume from
+    // the paywall (or jump straight to the paid report after payment).
     if (typeof window !== 'undefined') {
       const nextUrl = `/?page=resume-report&token=${encodeURIComponent(token)}`
       window.history.pushState({}, '', nextUrl)
@@ -615,8 +649,8 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
               Check Your Resume Before You Apply
             </h1>
             <p className="mt-3 text-sm text-slate-300 sm:text-base">
-              Upload your resume and get an instant score for formatting, keywords, clarity, and job fit. Built for
-              local job seekers who want a better shot before they apply.
+              Upload your resume and unlock a full report covering formatting, keywords, clarity, and job fit. Built
+              for local job seekers who want a better shot before they apply.
             </p>
             <div className="mt-4 flex flex-wrap gap-3 text-xs text-slate-400">
               <span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-4 w-4 text-emerald-300" /> Private & deleted after parsing</span>
@@ -632,11 +666,11 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
               </li>
               <li className="flex gap-3">
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-cyan-400 text-xs font-bold text-slate-950">2</span>
-                Get an instant preview score
+                Unlock your score for $9.99
               </li>
               <li className="flex gap-3">
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-cyan-400 text-xs font-bold text-slate-950">3</span>
-                Unlock the full report for $9.99
+                Read your full report and action checklist
               </li>
             </ol>
           </div>
@@ -663,14 +697,19 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
         </div>
       </PanelCard>
 
-      {/* Upload form / preview / report */}
+      {/* Upload form / paywall / paid report */}
       {mode === 'upload' && (
-        <ResumeUploadForm onPreviewReady={handlePreviewReady} />
+        <ResumeUploadForm onUploadReady={handleUploadReady} />
       )}
 
-      {mode === 'preview' && preview && (
+      {mode === 'unlock' && (
         <>
-          <ResumePreviewCard preview={preview} onUnlock={handleUnlock} unlocking={unlocking} />
+          <PaywallCard
+            priceCents={priceCents}
+            currency={currency}
+            onUnlock={handleUnlock}
+            unlocking={unlocking}
+          />
           {error ? (
             <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
               {error}
@@ -681,7 +720,7 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
 
       {mode === 'report' && (
         <>
-          {reportLoading && !preview ? (
+          {reportLoading && !paid && !fullReport ? (
             <PanelCard>
               <div className="flex items-center justify-center gap-3 py-8 text-sm text-slate-300">
                 <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
@@ -692,17 +731,24 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
 
           {paid && fullReport ? (
             <ResumeReport report={fullReport} targetJobTitle={reportTargetJobTitle} />
-          ) : preview ? (
+          ) : (
             <>
               <PanelCard className="border-cyan-400/20 bg-cyan-400/5">
                 <div className="flex items-center gap-3 text-sm text-cyan-100">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Waiting for Square to confirm payment. This usually takes a few seconds. Your full report will appear here automatically.
+                  Checking your payment status. If you just paid, your full report will appear here in a few seconds.
                 </div>
               </PanelCard>
-              <ResumePreviewCard preview={preview} onUnlock={handleUnlock} unlocking={unlocking} />
+              <PaywallCard
+                priceCents={priceCents}
+                currency={currency}
+                onUnlock={handleUnlock}
+                unlocking={unlocking}
+                headline={`Unlock your resume score for ${formatPrice(priceCents, currency)}`}
+                subhead="Pay once to reveal your full report. If you've already paid, this will refresh to the report automatically."
+              />
             </>
-          ) : null}
+          )}
 
           {error ? (
             <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
