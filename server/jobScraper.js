@@ -18,6 +18,45 @@ function stripTags(html) {
   return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
 }
 
+async function fetchPdfText(url) {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const mod = await import('pdf-parse')
+    const pdfParse = mod.default || mod
+    const { text } = await pdfParse(Buffer.from(await res.arrayBuffer()))
+    const lines = text
+      .replace(/\s*•\s*/g, '\n• ')
+      .split('\n')
+      .map(line => line.replace(/\s+/g, ' ').trim())
+    // PDFs hard-wrap paragraphs; rejoin a line onto the previous one when the previous
+    // line ran long without ending a sentence. Short lines (headings) and bullets stay put.
+    const out = []
+    for (const line of lines) {
+      const prev = out[out.length - 1]
+      const continues = (prev?.length > 55 && !/[.:!?]$/.test(prev)) || /^[a-z]/.test(line)
+      if (line && prev && continues && !line.startsWith('•')) {
+        out[out.length - 1] = `${prev} ${line}`
+      } else {
+        out.push(line)
+      }
+    }
+    const cleaned = out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+    return cleaned.length > 40 ? cleaned.slice(0, 8000) : null
+  } catch {
+    return null
+  }
+}
+
+async function addPdfDescriptions(jobs) {
+  for (const job of jobs) {
+    if (job.source_url.split('?')[0].toLowerCase().endsWith('.pdf')) {
+      job.job_description = await fetchPdfText(job.source_url)
+    }
+  }
+  return jobs
+}
+
 // ── Edgecombe County ──────────────────────────────────────────────────────────
 
 export async function scrapeEdgecombeCounty() {
@@ -68,7 +107,7 @@ export async function scrapeEdgecombeCounty() {
     })
   }
 
-  return jobs
+  return addPdfDescriptions(jobs)
 }
 
 // ── Tarboro ───────────────────────────────────────────────────────────────────
@@ -95,9 +134,12 @@ export async function scrapeTarboro() {
     const job_title = stripTags(titleMatch[2])
     if (!job_title) continue
 
-    const source_url = new URL(relHref, 'https://www.tarboro-nc.com/departments/human_resources.php').href
+    // Page has <base href="https://www.tarboro-nc.com/">. The detail pages are empty;
+    // the real posting is the PDF in .jobs-brief.
+    const pdfHref = row.match(/<div class="jobs-brief">[\s\S]*?<a\s[^>]*href=\s*"([^"]+\.pdf[^"]*)"/i)?.[1]
+    const source_url = new URL(pdfHref || relHref, 'https://www.tarboro-nc.com/').href
 
-    // Dates from <td class="jobs-dates"> — first occurrence = post, second = closing
+    // Dates from <td class="jobs-dates"> — first = post, second = closing ("Oct 15, 2026" or "Until Filled")
     const dateRe = /<td[^>]*class="jobs-dates"[^>]*>([\s\S]*?)<\/td>/gi
     const allDates = []
     let dm
@@ -105,10 +147,9 @@ export async function scrapeTarboro() {
       allDates.push(stripTags(dm[1]))
     }
     let expires_at = null
-    if (allDates[1]) {
-      const raw = allDates[1].trim()
-      const m = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/)
-      if (m) expires_at = `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`
+    const closing = allDates[1] ? new Date(allDates[1]) : null
+    if (closing && !isNaN(closing)) {
+      expires_at = `${closing.getFullYear()}-${String(closing.getMonth() + 1).padStart(2, '0')}-${String(closing.getDate()).padStart(2, '0')}`
     }
 
     const external_id = relHref.replace(/^.*\//, '').replace(/\?.*$/, '') || job_title.slice(0, 60)
@@ -126,7 +167,7 @@ export async function scrapeTarboro() {
     })
   }
 
-  return jobs
+  return addPdfDescriptions(jobs)
 }
 
 // ── USAJOBS ───────────────────────────────────────────────────────────────────
@@ -231,7 +272,7 @@ async function getEmployerId(pool, name, cache) {
 
 async function upsertJob(pool, job, employerId) {
   const description = job.job_description ||
-    `${job.job_title} with ${job.company}. Full details and application instructions are on the official posting: ${job.source_url}`
+    `${job.job_title} with ${job.company}. Full details and application instructions are on the official posting — use the Apply button above.`
   const [result] = await pool.execute(UPSERT_SQL, [
     employerId,
     job.job_title,
