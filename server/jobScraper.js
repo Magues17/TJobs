@@ -25,24 +25,22 @@ export async function scrapeEdgecombeCounty() {
   if (!res.ok) throw new Error(`Edgecombe fetch failed: ${res.status}`)
   const html = await res.text()
 
-  const jobs = []
+  const listMatch = html.match(/<ul class="file-group">([\s\S]*?)<!--\/\.file-group-->/i)
+  if (!listMatch) throw new Error('Edgecombe jobs list not found; page layout may have changed')
 
-  // Each job lives in a <li> inside a <ul class="file-group">
-  const liRe = /<li>([\s\S]*?)<\/li>/gi
+  const jobs = []
+  const liRe = /<li[^>]*>([\s\S]*?)<\/li>/gi
   let liMatch
-  while ((liMatch = liRe.exec(html)) !== null) {
+  while ((liMatch = liRe.exec(listMatch[1])) !== null) {
     const block = liMatch[1]
 
-    // Grab the anchor
     const aMatch = block.match(/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
     if (!aMatch) continue
     const href = aMatch[1]
-    if (!href.toLowerCase().endsWith('.pdf')) continue  // skip nav/language links
-    const rawTitle = stripTags(aMatch[2])
-    if (!rawTitle) continue
-
-    // Strip icon text (the span inside the anchor contributes no readable text after stripTags)
-    const job_title = rawTitle.replace(/^\s*[\w\s]*icon\s*/i, '').trim() || rawTitle
+    const path = href.split('?')[0]
+    if (!path.toLowerCase().endsWith('.pdf')) continue
+    const job_title = stripTags(aMatch[2])
+    if (!job_title) continue
 
     // Posted / expires from doc-file-desc span
     let expires_at = null
@@ -57,16 +55,14 @@ export async function scrapeEdgecombeCounty() {
       }
     }
 
-    const source_url = href.startsWith('http') ? href : `https://www.edgecombecountync.gov${href}`
-    const external_id = href.replace(/^.*\//, '').replace(/\?.*$/, '') || job_title.slice(0, 60)
-
     jobs.push({
       job_title,
+      company: 'Edgecombe County Government',
       city: 'Tarboro',
       industry: mapIndustry(job_title),
       source: 'edgecombe_county',
-      external_id,
-      source_url,
+      external_id: path.slice(-191),
+      source_url: new URL(href, 'https://www.edgecombecountync.gov/').href,
       job_description: null,
       expires_at,
     })
@@ -99,9 +95,7 @@ export async function scrapeTarboro() {
     const job_title = stripTags(titleMatch[2])
     if (!job_title) continue
 
-    const source_url = relHref.startsWith('http')
-      ? relHref
-      : `https://www.tarboro-nc.com/departments/${relHref}`
+    const source_url = new URL(relHref, 'https://www.tarboro-nc.com/departments/human_resources.php').href
 
     // Dates from <td class="jobs-dates"> — first occurrence = post, second = closing
     const dateRe = /<td[^>]*class="jobs-dates"[^>]*>([\s\S]*?)<\/td>/gi
@@ -121,6 +115,7 @@ export async function scrapeTarboro() {
 
     jobs.push({
       job_title,
+      company: 'Town of Tarboro',
       city: 'Tarboro',
       industry: mapIndustry(job_title),
       source: 'tarboro',
@@ -141,7 +136,7 @@ export async function fetchUSAJOBS() {
   const userAgent = process.env.USAJOBS_USER_AGENT
   if (!apiKey) return [] // skip silently if not configured
 
-  const url = 'https://data.usajobs.gov/api/search?Keyword=&LocationName=Tarboro%2C%20NC&Radius=30'
+  const url = 'https://data.usajobs.gov/api/search?LocationName=Tarboro%2C%20NC&Radius=30&RemoteIndicator=False&ResultsPerPage=100'
   const res = await fetch(url, {
     headers: {
       Host: 'data.usajobs.gov',
@@ -153,41 +148,60 @@ export async function fetchUSAJOBS() {
   const data = await res.json()
 
   const items = data?.SearchResult?.SearchResultItems ?? []
-  return items.map(item => {
+  const jobs = []
+  for (const item of items) {
     const d = item.MatchedObjectDescriptor
+    // Statewide postings list many cities; show the one nearest Tarboro.
+    const ncLocation = (d.PositionLocation ?? [])
+      .filter(l => l.CountrySubDivisionCode === 'North Carolina')
+      .sort((a, b) => milesFromTarboro(a) - milesFromTarboro(b))[0]
+    if (!ncLocation || !d.PositionURI || milesFromTarboro(ncLocation) > 40) continue
     const rem = d.PositionRemuneration?.[0] ?? {}
     const job_title = d.PositionTitle ?? ''
-    const city = d.PositionLocation?.[0]?.CityName ?? 'Tarboro'
-    return {
+    jobs.push({
       job_title,
-      city,
+      company: d.OrganizationName || 'U.S. Federal Government',
+      city: ncLocation.CityName?.replace(/,.*$/, '') || 'Tarboro',
       industry: mapIndustry(job_title),
       source: 'usajobs',
-      external_id: d.PositionID ?? d.PositionURI,
-      source_url: d.PositionURI ?? '',
+      external_id: String(d.PositionID ?? d.PositionURI).slice(0, 191),
+      source_url: d.PositionURI,
       job_description: d.UserArea?.Details?.JobSummary ?? null,
-      expires_at: null,
+      expires_at: d.ApplicationCloseDate ? d.ApplicationCloseDate.slice(0, 10) : null,
       pay_min: rem.MinimumRange ? parseFloat(rem.MinimumRange) : null,
       pay_max: rem.MaximumRange ? parseFloat(rem.MaximumRange) : null,
-      pay_type: rem.RateIntervalCode ?? null,
-    }
-  })
+      pay_type: USAJOBS_PAY_TYPES[rem.RateIntervalCode] ?? null,
+    })
+  }
+  return jobs
 }
+
+function milesFromTarboro({ Latitude, Longitude }) {
+  if (Latitude == null || Longitude == null) return Infinity
+  const rad = x => (x * Math.PI) / 180
+  const dLat = rad(Latitude - 35.8968)
+  const dLon = rad(Longitude - -77.5358)
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(35.8968)) * Math.cos(rad(Latitude)) * Math.sin(dLon / 2) ** 2
+  return 3959 * 2 * Math.asin(Math.sqrt(a))
+}
+
+const USAJOBS_PAY_TYPES = { PA: 'salary', PH: 'hourly', PD: 'daily', PW: 'weekly', PM: 'monthly' }
 
 // ── Upsert helper ─────────────────────────────────────────────────────────────
 
 const UPSERT_SQL = `
   INSERT INTO job_posts
-    (job_title, city, industry, source, external_id, source_url,
+    (employer_id, job_title, city, industry, source, external_id, source_url,
      job_description, expires_at, pay_min, pay_max, pay_type,
-     status, published_at, employer_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', NOW(), NULL)
+     status, published_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NOW())
   ON DUPLICATE KEY UPDATE
+    employer_id     = VALUES(employer_id),
     job_title       = VALUES(job_title),
     city            = VALUES(city),
     industry        = VALUES(industry),
     source_url      = VALUES(source_url),
-    job_description = COALESCE(VALUES(job_description), job_description),
+    job_description = VALUES(job_description),
     expires_at      = COALESCE(VALUES(expires_at), expires_at),
     pay_min         = COALESCE(VALUES(pay_min), pay_min),
     pay_max         = COALESCE(VALUES(pay_max), pay_max),
@@ -195,16 +209,39 @@ const UPSERT_SQL = `
     updated_at      = NOW()
 `
 
-async function upsertJob(pool, job) {
+// Scraped postings hang off one auto-created, pre-approved employer per organization,
+// because public listings require an active, onboarded employer.
+async function getEmployerId(pool, name, cache) {
+  if (cache.has(name)) return cache.get(name)
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)
+  const email = `listings+${slug}@tarborojobs.com`
+  const [rows] = await pool.query('SELECT id FROM employers WHERE email = ? LIMIT 1', [email])
+  let id = rows[0]?.id
+  if (!id) {
+    const [ins] = await pool.query(
+      `INSERT INTO employers (business_name, email, subscription_status, access_status, onboarding_completed, status)
+       VALUES (?, ?, 'active', 'active', 1, 'new')`,
+      [name, email]
+    )
+    id = ins.insertId
+  }
+  cache.set(name, id)
+  return id
+}
+
+async function upsertJob(pool, job, employerId) {
+  const description = job.job_description ||
+    `${job.job_title} with ${job.company}. Full details and application instructions are on the official posting: ${job.source_url}`
   const [result] = await pool.execute(UPSERT_SQL, [
+    employerId,
     job.job_title,
     job.city,
     job.industry,
     job.source,
     job.external_id,
     job.source_url,
-    job.job_description ?? null,
-    job.expires_at ?? null,
+    description,
+    job.expires_at ? `${job.expires_at} 23:59:59` : null,
     job.pay_min ?? null,
     job.pay_max ?? null,
     job.pay_type ?? null,
@@ -224,7 +261,9 @@ export async function runAllScrapers(pool) {
 
   let imported = 0
   let updated = 0
+  let closed = 0
   const errors = []
+  const employerCache = new Map()
 
   for (const { name, fn } of scrapers) {
     let jobs
@@ -235,16 +274,30 @@ export async function runAllScrapers(pool) {
       continue
     }
 
+    const seen = []
     for (const job of jobs) {
       try {
-        const outcome = await upsertJob(pool, job)
+        const employerId = await getEmployerId(pool, job.company, employerCache)
+        const outcome = await upsertJob(pool, job, employerId)
         if (outcome === 'imported') imported++
         else updated++
+        seen.push(job.external_id)
       } catch (err) {
         errors.push({ source: name, job: job.external_id, error: err.message })
       }
     }
+
+    // Close postings the source no longer lists (filled/withdrawn). Skip if the fetch came back
+    // empty, so a source outage or layout change can't wipe every listing.
+    if (seen.length) {
+      const [res] = await pool.query(
+        `UPDATE job_posts SET status = 'closed', updated_at = NOW()
+         WHERE source = ? AND status = 'open' AND external_id NOT IN (?)`,
+        [name, seen]
+      )
+      closed += res.affectedRows
+    }
   }
 
-  return { imported, updated, errors }
+  return { imported, updated, closed, errors }
 }

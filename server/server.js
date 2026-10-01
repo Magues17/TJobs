@@ -547,6 +547,7 @@ async function findPublicJobPostById(jobId) {
       jp.created_at,
       jp.published_at,
       jp.expires_at,
+      jp.source_url,
       e.business_name,
       e.industry AS employer_industry
     FROM job_posts jp
@@ -1937,6 +1938,7 @@ app.get('/api/jobposts/:id', async (req, res) => {
         industry: row.industry,
         experience_level: row.experience_level,
         description: row.job_description,
+        source_url: row.source_url,
         status: row.status,
         posted: row.published_at || row.created_at,
         expires_at: row.expires_at,
@@ -4956,6 +4958,7 @@ app.get('/api/jobposts', async (req, res) => {
         jp.created_at,
         jp.published_at,
         jp.expires_at,
+        jp.source_url,
         e.business_name,
         e.industry AS employer_industry
       FROM job_posts jp
@@ -4978,6 +4981,7 @@ app.get('/api/jobposts', async (req, res) => {
       industry: row.industry,
       experience_level: row.experience_level,
       description: row.job_description,
+      source_url: row.source_url,
       status: row.status,
       posted: row.published_at || row.created_at,
       expires_at: row.expires_at,

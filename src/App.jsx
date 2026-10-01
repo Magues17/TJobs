@@ -940,13 +940,24 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
         title={job.title}
         subtitle={`${job.company} • ${job.city || 'Tarboro area'}${job.type ? ` • ${humanizeJobType(job.type)}` : ''}`}
         action={
-          <button
-            type="button"
-            onClick={onApply}
-            className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
-          >
-            Apply for this job
-          </button>
+          /^https?:\/\//i.test(job.source_url || '') ? (
+            <a
+              href={job.source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block w-full rounded-2xl bg-cyan-400 px-5 py-3 text-center text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
+            >
+              Apply on official site
+            </a>
+          ) : (
+            <button
+              type="button"
+              onClick={onApply}
+              className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
+            >
+              Apply for this job
+            </button>
+          )
         }
       />
 
