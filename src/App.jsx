@@ -15,6 +15,8 @@ import {
   Menu,
   ShieldCheck,
   Sparkles,
+  FileText,
+  BookOpen,
   X,
 } from 'lucide-react'
 import {
@@ -53,6 +55,8 @@ import {
 } from './admin/auth'
 import { humanizeJobType } from './employer/utils'
 import ResumeCheckerPage from './resumeChecker/ResumeCheckerPage'
+import CoverLetterPage from './coverLetter/CoverLetterPage'
+import InterviewPrepPage from './interviewPrep/InterviewPrepPage'
 import {
   employerIndustries,
   employerJobTypes,
@@ -92,6 +96,9 @@ const jobTypes = ['All Types', 'Full Time', 'Part Time', 'Temporary', 'Contract'
 const legalPages = ['privacy-policy', 'terms-of-use', 'employer-posting-rules']
 const adminPages = ['admin-login', 'admin-dashboard']
 const resumeCheckerPages = ['resume-checker', 'resume-report']
+const coverLetterPages = ['cover-letter', 'cover-letter-result']
+const interviewPrepPages = ['interview-prep', 'interview-prep-result']
+const aiToolPages = [...resumeCheckerPages, ...coverLetterPages, ...interviewPrepPages]
 const LEGAL_LAST_UPDATED = 'April 18, 2026'
 
 const privacyPolicySections = [
@@ -336,7 +343,7 @@ function getInitialRoute() {
     return { page: 'employer-onboarding', jobId: null }
   }
   if (page === 'employer-payment-success') return { page: 'employer-payment-success', jobId: null }
-  if (resumeCheckerPages.includes(page)) return { page, jobId: null }
+  if (aiToolPages.includes(page)) return { page, jobId: null }
   if (legalPages.includes(page) || adminPages.includes(page)) return { page, jobId: null }
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
@@ -350,7 +357,7 @@ function buildPublicPath(page, jobId = null) {
   if (page === 'job-apply' && jobId) return `/jobs/${jobId}/apply`
   if (legalPages.includes(page) || adminPages.includes(page)) return `/?page=${page}`
   if (page === 'employer-payment-success') return '/?page=employer-payment-success'
-  if (resumeCheckerPages.includes(page)) return `/?page=${page}`
+  if (aiToolPages.includes(page)) return `/?page=${page}`
   return '/'
 }
 
@@ -368,6 +375,8 @@ function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onL
     { key: 'jobs', label: 'Jobs', icon: Briefcase },
     { key: 'businesses', label: 'Businesses', icon: Building2 },
     { key: 'resume-checker', label: 'Resume Check', icon: Sparkles },
+    { key: 'cover-letter', label: 'Cover Letter', icon: FileText },
+    { key: 'interview-prep', label: 'Interview Prep', icon: BookOpen },
     { key: 'list-business', label: 'For Employers', icon: Landmark },
     employerSession
       ? {
@@ -1778,7 +1787,7 @@ export default function TarboroJobsHomepage() {
   const [candidateActionError, setCandidateActionError] = useState('')
 
   function setBrowserLocation(page, jobId = null, options = {}) {
-    if (!['jobs', 'job-detail', 'job-apply', 'employer-payment-success', ...legalPages, ...adminPages, ...resumeCheckerPages].includes(page)) return
+    if (!['jobs', 'job-detail', 'job-apply', 'employer-payment-success', ...legalPages, ...adminPages, ...aiToolPages].includes(page)) return
 
     const nextPath = buildPublicPath(page, jobId)
     const currentPath = `${window.location.pathname}${window.location.search}`
@@ -1799,7 +1808,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (page === 'job-detail' || page === 'job-apply' || page === 'employer-payment-success' || legalPages.includes(page) || adminPages.includes(page) || resumeCheckerPages.includes(page)) {
+    if (page === 'job-detail' || page === 'job-apply' || page === 'employer-payment-success' || legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page)) {
       setBrowserLocation(page, jobId, options)
     }
   }
@@ -1810,7 +1819,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (legalPages.includes(page) || adminPages.includes(page) || resumeCheckerPages.includes(page)) {
+    if (legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page)) {
       navigateToPage(page, null)
       return
     }
@@ -2534,6 +2543,18 @@ export default function TarboroJobsHomepage() {
           initialMode="report"
           onBack={() => navigateToPage('jobs', null)}
         />
+      )}
+      {currentPage === 'cover-letter' && (
+        <CoverLetterPage initialMode="form" onBack={() => navigateToPage('jobs', null)} />
+      )}
+      {currentPage === 'cover-letter-result' && (
+        <CoverLetterPage initialMode="paywall" onBack={() => navigateToPage('jobs', null)} />
+      )}
+      {currentPage === 'interview-prep' && (
+        <InterviewPrepPage initialMode="form" onBack={() => navigateToPage('jobs', null)} />
+      )}
+      {currentPage === 'interview-prep-result' && (
+        <InterviewPrepPage initialMode="paywall" onBack={() => navigateToPage('jobs', null)} />
       )}
       {currentPage === 'list-business' && <ListBusinessPage />}
       {currentPage === 'employer-login' && (

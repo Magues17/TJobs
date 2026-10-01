@@ -11,6 +11,8 @@ import nodemailer from 'nodemailer'
 import { fileURLToPath } from 'url'
 import pool from './db.js'
 import { analyzeResume, previewFromFullReport } from './resumeAnalyzer.js'
+import { runAllScrapers } from './jobScraper.js'
+import { generateCoverLetter, generateInterviewPrep } from './aiService.js'
 
 dotenv.config()
 
@@ -1374,6 +1376,49 @@ async function ensureResumeChecksTable() {
   `)
 }
 
+async function ensureJobScraperColumns() {
+  await pool.query(`ALTER TABLE job_posts ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'employer'`).catch(() => {})
+  await pool.query(`ALTER TABLE job_posts ADD COLUMN IF NOT EXISTS external_id VARCHAR(255)`).catch(() => {})
+  await pool.query(`ALTER TABLE job_posts ADD COLUMN IF NOT EXISTS source_url VARCHAR(500)`).catch(() => {})
+  try {
+    await pool.query(`ALTER TABLE job_posts ADD UNIQUE KEY uq_job_source (source, external_id)`)
+  } catch {}
+}
+
+async function ensureCoverLetterTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cover_letter_requests (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      public_token VARCHAR(64) NOT NULL UNIQUE,
+      job_title VARCHAR(255),
+      job_description TEXT,
+      user_name VARCHAR(255),
+      user_background TEXT,
+      letter_text LONGTEXT,
+      payment_status VARCHAR(32) DEFAULT 'pending',
+      square_order_id VARCHAR(255),
+      price_cents INT DEFAULT 499,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `)
+}
+
+async function ensureInterviewPrepTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS interview_prep_requests (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      public_token VARCHAR(64) NOT NULL UNIQUE,
+      job_title VARCHAR(255),
+      job_description TEXT,
+      questions_json LONGTEXT,
+      payment_status VARCHAR(32) DEFAULT 'pending',
+      square_order_id VARCHAR(255),
+      price_cents INT DEFAULT 499,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `)
+}
+
 async function ensureEmployerPendingCheckoutsTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS employer_pending_checkouts (
@@ -2236,6 +2281,29 @@ app.post('/api/square/webhook', async (req, res) => {
     })
     if (resumeCheckerHandled) {
       return res.status(200).json({ success: true, type: 'resume_check' })
+    }
+
+    // Cover letter and interview prep webhook routing
+    const paymentNote = safeTrim(payment.note, 500)
+    if (paymentNote && paymentNote.startsWith('cover_letter:')) {
+      const clToken = paymentNote.slice('cover_letter:'.length).trim()
+      if (clToken) {
+        const paymentStatus = String(payment.status || '').toLowerCase()
+        if (paymentStatus === 'completed') {
+          await pool.query(`UPDATE cover_letter_requests SET payment_status='paid' WHERE public_token=?`, [clToken])
+        }
+        return res.status(200).json({ success: true, type: 'cover_letter' })
+      }
+    }
+    if (paymentNote && paymentNote.startsWith('interview_prep:')) {
+      const ipToken = paymentNote.slice('interview_prep:'.length).trim()
+      if (ipToken) {
+        const paymentStatus = String(payment.status || '').toLowerCase()
+        if (paymentStatus === 'completed') {
+          await pool.query(`UPDATE interview_prep_requests SET payment_status='paid' WHERE public_token=?`, [ipToken])
+        }
+        return res.status(200).json({ success: true, type: 'interview_prep' })
+      }
     }
 
     let checkout = null
@@ -5440,6 +5508,168 @@ app.post('/api/admin/tokens/:id/revoke', requireAdminAuth, async (req, res) => {
   }
 })
 
+// ── Square quick-pay helper (used by cover letter and interview prep) ─────────
+
+async function createSquareQuickPayLink({ name, priceCents, currency, note, redirectUrl }) {
+  if (!SQUARE_ACCESS_TOKEN || !SQUARE_LOCATION_ID) {
+    throw new Error('Square checkout is not configured.')
+  }
+  const payload = {
+    idempotency_key: crypto.randomUUID(),
+    quick_pay: {
+      name,
+      price_money: { amount: priceCents, currency: currency || 'USD' },
+      location_id: SQUARE_LOCATION_ID,
+    },
+    checkout_options: { redirect_url: redirectUrl, ask_for_shipping_address: false },
+    payment_note: note,
+  }
+  const response = await squareApiRequest('/v2/online-checkout/payment-links', { method: 'POST', body: payload })
+  const url = response?.payment_link?.url
+  if (!url) throw new Error('Square did not return a checkout URL.')
+  return url
+}
+
+// ── Job Scraper ──────────────────────────────────────────────────────────────
+
+app.post('/api/admin/scrape-jobs', requireAdminAuth, async (req, res) => {
+  try {
+    const result = await runAllScrapers(pool)
+    res.json({ success: true, ...result })
+  } catch (error) {
+    console.error('POST /api/admin/scrape-jobs error:', error)
+    res.status(500).json({ success: false, error: error?.message || 'Scrape failed.' })
+  }
+})
+
+// ── Cover Letter ──────────────────────────────────────────────────────────────
+
+const COVER_LETTER_PRICE_CENTS = 499
+
+app.post('/api/cover-letter/generate', async (req, res) => {
+  try {
+    const { jobTitle, jobDescription, userName, userBackground } = req.body || {}
+    if (!jobTitle || !userName || !userBackground) {
+      return res.status(400).json({ success: false, error: 'jobTitle, userName, and userBackground are required.' })
+    }
+    const publicToken = `cl_${crypto.randomBytes(18).toString('base64url')}`
+    const letterText = await generateCoverLetter({ jobTitle, jobDescription: jobDescription || '', userName, userBackground })
+    await pool.query(
+      `INSERT INTO cover_letter_requests (public_token, job_title, job_description, user_name, user_background, letter_text, price_cents)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [publicToken, jobTitle, jobDescription || '', userName, userBackground, letterText, COVER_LETTER_PRICE_CENTS]
+    )
+    res.json({ success: true, publicToken, priceCents: COVER_LETTER_PRICE_CENTS, currency: 'USD' })
+  } catch (error) {
+    console.error('POST /api/cover-letter/generate error:', error)
+    res.status(500).json({ success: false, error: error?.message || 'Failed to generate cover letter.' })
+  }
+})
+
+app.post('/api/cover-letter/create-checkout', async (req, res) => {
+  try {
+    const { publicToken } = req.body || {}
+    const [rows] = await pool.query('SELECT * FROM cover_letter_requests WHERE public_token = ?', [publicToken])
+    if (!rows.length) return res.status(404).json({ success: false, error: 'Request not found.' })
+    const row = rows[0]
+    if (row.payment_status === 'paid') return res.json({ success: true, alreadyPaid: true })
+
+    if (process.env.RESUME_CHECKER_DEV_BYPASS === '1') {
+      await pool.query(`UPDATE cover_letter_requests SET payment_status='paid' WHERE public_token=?`, [publicToken])
+      return res.json({ success: true, checkoutUrl: `${APP_BASE_URL}/?page=cover-letter-result&token=${publicToken}` })
+    }
+
+    const checkoutUrl = await createSquareQuickPayLink({
+      name: 'Cover Letter',
+      priceCents: COVER_LETTER_PRICE_CENTS,
+      currency: 'USD',
+      note: `cover_letter:${publicToken}`,
+      redirectUrl: `${APP_BASE_URL}/?page=cover-letter-result&token=${publicToken}`,
+    })
+    res.json({ success: true, checkoutUrl })
+  } catch (error) {
+    console.error('POST /api/cover-letter/create-checkout error:', error)
+    res.status(500).json({ success: false, error: error?.message || 'Failed to create checkout.' })
+  }
+})
+
+app.get('/api/cover-letter/result/:token', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM cover_letter_requests WHERE public_token = ?', [req.params.token])
+    if (!rows.length) return res.status(404).json({ success: false, error: 'Not found.' })
+    const row = rows[0]
+    if (row.payment_status !== 'paid') {
+      return res.json({ success: true, paid: false, priceCents: row.price_cents, currency: 'USD', jobTitle: row.job_title })
+    }
+    res.json({ success: true, paid: true, letterText: row.letter_text, jobTitle: row.job_title })
+  } catch (error) {
+    res.status(500).json({ success: false, error: error?.message || 'Failed to retrieve result.' })
+  }
+})
+
+// ── Interview Prep ────────────────────────────────────────────────────────────
+
+const INTERVIEW_PREP_PRICE_CENTS = 499
+
+app.post('/api/interview-prep/generate', async (req, res) => {
+  try {
+    const { jobTitle, jobDescription } = req.body || {}
+    if (!jobTitle) return res.status(400).json({ success: false, error: 'jobTitle is required.' })
+    const publicToken = `ip_${crypto.randomBytes(18).toString('base64url')}`
+    const questions = await generateInterviewPrep({ jobTitle, jobDescription: jobDescription || '' })
+    await pool.query(
+      `INSERT INTO interview_prep_requests (public_token, job_title, job_description, questions_json, price_cents)
+       VALUES (?, ?, ?, ?, ?)`,
+      [publicToken, jobTitle, jobDescription || '', JSON.stringify(questions), INTERVIEW_PREP_PRICE_CENTS]
+    )
+    res.json({ success: true, publicToken, priceCents: INTERVIEW_PREP_PRICE_CENTS, currency: 'USD' })
+  } catch (error) {
+    console.error('POST /api/interview-prep/generate error:', error)
+    res.status(500).json({ success: false, error: error?.message || 'Failed to generate interview prep.' })
+  }
+})
+
+app.post('/api/interview-prep/create-checkout', async (req, res) => {
+  try {
+    const { publicToken } = req.body || {}
+    const [rows] = await pool.query('SELECT * FROM interview_prep_requests WHERE public_token = ?', [publicToken])
+    if (!rows.length) return res.status(404).json({ success: false, error: 'Request not found.' })
+    const row = rows[0]
+    if (row.payment_status === 'paid') return res.json({ success: true, alreadyPaid: true })
+
+    if (process.env.RESUME_CHECKER_DEV_BYPASS === '1') {
+      await pool.query(`UPDATE interview_prep_requests SET payment_status='paid' WHERE public_token=?`, [publicToken])
+      return res.json({ success: true, checkoutUrl: `${APP_BASE_URL}/?page=interview-prep-result&token=${publicToken}` })
+    }
+
+    const checkoutUrl = await createSquareQuickPayLink({
+      name: 'Interview Prep Pack',
+      priceCents: INTERVIEW_PREP_PRICE_CENTS,
+      currency: 'USD',
+      note: `interview_prep:${publicToken}`,
+      redirectUrl: `${APP_BASE_URL}/?page=interview-prep-result&token=${publicToken}`,
+    })
+    res.json({ success: true, checkoutUrl })
+  } catch (error) {
+    console.error('POST /api/interview-prep/create-checkout error:', error)
+    res.status(500).json({ success: false, error: error?.message || 'Failed to create checkout.' })
+  }
+})
+
+app.get('/api/interview-prep/result/:token', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM interview_prep_requests WHERE public_token = ?', [req.params.token])
+    if (!rows.length) return res.status(404).json({ success: false, error: 'Not found.' })
+    const row = rows[0]
+    if (row.payment_status !== 'paid') {
+      return res.json({ success: true, paid: false, priceCents: row.price_cents, currency: 'USD', jobTitle: row.job_title })
+    }
+    res.json({ success: true, paid: true, questions: JSON.parse(row.questions_json || '[]'), jobTitle: row.job_title })
+  } catch (error) {
+    res.status(500).json({ success: false, error: error?.message || 'Failed to retrieve result.' })
+  }
+})
+
 if (fs.existsSync(frontendIndexFile)) {
   app.use(express.static(frontendDistDir))
 
@@ -5483,11 +5713,17 @@ async function startServer() {
   await ensureJobSeekerApplicationColumns()
   await ensureEmployerPendingCheckoutsTable()
   await ensureResumeChecksTable()
+  await ensureJobScraperColumns()
+  await ensureCoverLetterTable()
+  await ensureInterviewPrepTable()
   await expireOpenJobs()
 
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`)
   })
+
+  // ponytail: simple interval, replace with proper cron if scheduling precision matters
+  setInterval(() => runAllScrapers(pool).catch(console.error), 24 * 60 * 60 * 1000)
 }
 
 startServer().catch((error) => {
