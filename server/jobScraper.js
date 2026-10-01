@@ -37,6 +37,7 @@ export async function scrapeEdgecombeCounty() {
     const aMatch = block.match(/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
     if (!aMatch) continue
     const href = aMatch[1]
+    if (!href.toLowerCase().endsWith('.pdf')) continue  // skip nav/language links
     const rawTitle = stripTags(aMatch[2])
     if (!rawTitle) continue
 
