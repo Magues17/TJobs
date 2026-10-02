@@ -1004,19 +1004,35 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
             </div>
           </Card>
 
-          <Card title="Apply through TarboroJobs">
-            <div className="space-y-3 text-sm leading-6 text-slate-400">
-              <p>Your application is tied to this exact job and routed only to the employer that owns this posting.</p>
-              <p>PDF resumes only. The system also runs a simple ATS-style comparison so the employer can see how closely the resume matches the posting.</p>
-              <button
-                type="button"
-                onClick={onApply}
-                className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
-              >
-                Continue to application
-              </button>
-            </div>
-          </Card>
+          {/^https?:\/\//i.test(job.source_url || '') ? (
+            <Card title="How to apply">
+              <div className="space-y-3 text-sm leading-6 text-slate-400">
+                <p>This position is posted by {job.company}. Applications are handled directly on their official site, not through TarboroJobs.</p>
+                <a
+                  href={job.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block w-full rounded-2xl bg-cyan-400 px-5 py-3 text-center text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+                >
+                  View official posting
+                </a>
+              </div>
+            </Card>
+          ) : (
+            <Card title="Apply through TarboroJobs">
+              <div className="space-y-3 text-sm leading-6 text-slate-400">
+                <p>Your application is tied to this exact job and routed only to the employer that owns this posting.</p>
+                <p>PDF resumes only. The system also runs a simple ATS-style comparison so the employer can see how closely the resume matches the posting.</p>
+                <button
+                  type="button"
+                  onClick={onApply}
+                  className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+                >
+                  Continue to application
+                </button>
+              </div>
+            </Card>
+          )}
         </div>
       </div>
     </div>

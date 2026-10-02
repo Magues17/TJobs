@@ -1974,6 +1974,13 @@ app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, re
       })
     }
 
+    if (job.source_url) {
+      return res.status(400).json({
+        success: false,
+        error: 'This job accepts applications on the employer\'s official site, not through TarboroJobs.',
+      })
+    }
+
     const fullName = safeTrim(req.body.full_name, 255)
     const email = normalizeEmail(req.body.email)
     const phone = toNullableString(req.body.phone, 50)

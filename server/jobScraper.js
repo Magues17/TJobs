@@ -14,6 +14,24 @@ function mapIndustry(title) {
   return 'Government/Public Sector'
 }
 
+// Title wins over description; within the description the earliest mention wins.
+// Postings that never say default to full-time, which is what these local government jobs are.
+function inferEmploymentType(title, text = '') {
+  const rules = [
+    [/part[\s-]?time|\(pt\)/i, 'part-time'],
+    [/temporary|seasonal|intermittent/i, 'temporary'],
+    [/full[\s-]?time/i, 'full-time'],
+  ]
+  for (const [re, type] of rules) if (re.test(title)) return type
+  let best = null
+  // "temporary" in body text is usually "temporary assignment", not the job's schedule.
+  for (const [re, type] of rules.filter(([, type]) => type !== 'temporary')) {
+    const i = text.search(re)
+    if (i !== -1 && (!best || i < best.i)) best = { i, type }
+  }
+  return best?.type ?? 'full-time'
+}
+
 function stripTags(html) {
   return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
 }
@@ -53,6 +71,7 @@ async function addPdfDescriptions(jobs) {
     if (job.source_url.split('?')[0].toLowerCase().endsWith('.pdf')) {
       job.job_description = await fetchPdfText(job.source_url)
     }
+    job.employment_type = inferEmploymentType(job.job_title, job.job_description ?? '')
   }
   return jobs
 }
@@ -199,8 +218,10 @@ export async function fetchUSAJOBS() {
     if (!ncLocation || !d.PositionURI || milesFromTarboro(ncLocation) > 40) continue
     const rem = d.PositionRemuneration?.[0] ?? {}
     const job_title = d.PositionTitle ?? ''
+    const schedule = [...(d.PositionSchedule ?? []), ...(d.PositionOfferingType ?? [])].map(s => s.Name).join(' ')
     jobs.push({
       job_title,
+      employment_type: inferEmploymentType(`${job_title} ${schedule}`),
       company: d.OrganizationName || 'U.S. Federal Government',
       city: ncLocation.CityName?.replace(/,.*$/, '') || 'Tarboro',
       industry: mapIndustry(job_title),
@@ -234,10 +255,11 @@ const UPSERT_SQL = `
   INSERT INTO job_posts
     (employer_id, job_title, city, industry, source, external_id, source_url,
      job_description, expires_at, pay_min, pay_max, pay_type,
-     status, published_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NOW())
+     employment_type, status, published_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NOW())
   ON DUPLICATE KEY UPDATE
     employer_id     = VALUES(employer_id),
+    employment_type = VALUES(employment_type),
     job_title       = VALUES(job_title),
     city            = VALUES(city),
     industry        = VALUES(industry),
@@ -286,6 +308,7 @@ async function upsertJob(pool, job, employerId) {
     job.pay_min ?? null,
     job.pay_max ?? null,
     job.pay_type ?? null,
+    job.employment_type,
   ])
   // affectedRows=1 → insert, affectedRows=2 → update (MySQL ON DUPLICATE KEY)
   return result.affectedRows === 1 ? 'imported' : 'updated'
