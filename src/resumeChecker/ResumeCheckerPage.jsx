@@ -17,6 +17,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { track } from '../lib/track'
+import KitPaywallExtras from '../bundle/KitBits'
 import {
   FileText,
   Upload,
@@ -315,7 +316,7 @@ function formatPrice(priceCents, currency) {
   return `${dollars} ${currency}`
 }
 
-function PaywallCard({ priceCents, currency, onUnlock, unlocking, headline, subhead }) {
+function PaywallCard({ priceCents, currency, onUnlock, unlocking, headline, subhead, orderToken }) {
   const priceLabel = formatPrice(priceCents, currency)
   return (
     <PanelCard className="space-y-6">
@@ -352,6 +353,8 @@ function PaywallCard({ priceCents, currency, onUnlock, unlocking, headline, subh
           <span className="text-xs text-slate-400">Secure checkout via Square.</span>
         </div>
       </div>
+
+      <KitPaywallExtras product="resume_check" orderToken={orderToken} />
 
       <ul className="grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
         {[
@@ -712,6 +715,7 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
             currency={currency}
             onUnlock={handleUnlock}
             unlocking={unlocking}
+            orderToken={publicToken}
           />
           {error ? (
             <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
@@ -747,6 +751,7 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
                 currency={currency}
                 onUnlock={handleUnlock}
                 unlocking={unlocking}
+                orderToken={publicToken}
                 headline={`Unlock your resume score for ${formatPrice(priceCents, currency)}`}
                 subhead="Pay once to reveal your full report. If you've already paid, this will refresh to the report automatically."
               />

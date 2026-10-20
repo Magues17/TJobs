@@ -115,6 +115,40 @@ function ActionButton({ children, tone = 'default', ...props }) {
   )
 }
 
+// Job Seeker Kit orders and the credits spent. Loads /api/admin/bundles.
+function KitOrdersPanel({ Card, refreshKey }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    requestAdminJson('/admin/bundles')
+      .then((result) => { setData(result); setError('') })
+      .catch((err) => setError(err?.message || 'Could not load Job Seeker Kit orders.'))
+  }, [refreshKey])
+
+  return (
+    <Card title="Job Seeker Kit">
+      {error ? (
+        <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div>
+      ) : null}
+      <div className="grid grid-cols-3 gap-4">
+        <AiMetric label="Paid kits" value={data ? data.paid_orders : '—'} />
+        <AiMetric label="Sales" value={data ? formatCents(data.sales_cents) : '—'} />
+        <AiMetric label="Credits unused" value={data ? data.credits_left : '—'} />
+      </div>
+      <div className="space-y-2">
+        {(data?.recent_orders || []).map((order) => (
+          <div key={order.id} className="rounded-2xl border border-slate-800 bg-slate-950/55 px-4 py-3 text-sm text-slate-300">
+            <span className="font-semibold text-white">#{order.id}</span> {order.status} - {formatCents(order.price_cents)}
+            {order.email ? ` - ${order.email}` : ''} - credits left: resume {order.credits.resume_check}, cover letter{' '}
+            {order.credits.cover_letter}, interview prep {order.credits.interview_prep}
+          </div>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
 function AiMetric({ label, value }) {
   return (
     <div>
@@ -274,6 +308,7 @@ const PRODUCT_LABELS = {
   employer_plan: 'Employer plan',
   job_post: 'Job post',
   featured: 'Featured',
+  bundle: 'Job Seeker Kit',
 }
 
 function BarList({ rows, empty = 'Nothing yet.' }) {
@@ -625,6 +660,8 @@ export default function AdminDashboardPage({
       <FacebookPanel Card={Card} refreshKey={aiRefreshKey} />
 
       <AiProductsPanel Card={Card} refreshKey={aiRefreshKey} />
+
+      <KitOrdersPanel Card={Card} refreshKey={aiRefreshKey} />
 
       <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
         <Card title="Create employer onboarding link">

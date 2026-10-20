@@ -7,7 +7,7 @@ export const EVENT_TYPES = new Set([
   'page_view', 'job_view', 'apply_start', 'apply_submit', 'outbound_apply_click',
   'alert_signup', 'checkout_start', 'tool_start',
 ])
-export const PRODUCTS = ['resume_check', 'cover_letter', 'interview_prep', 'employer_plan', 'job_post', 'featured']
+export const PRODUCTS = ['resume_check', 'cover_letter', 'interview_prep', 'employer_plan', 'job_post', 'featured', 'bundle']
 const DEVICES = new Set(['mobile', 'desktop', 'tablet'])
 const BOT_RE = /bot|crawl|spider|slurp|headless|lighthouse|pingdom|uptime|monitor|facebookexternalhit|preview|python-requests|curl\/|wget|axios|node-fetch|go-http|java\//i
 const RETENTION_DAYS = 400
@@ -99,9 +99,11 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
       const since = `created_at >= CURDATE() - INTERVAL ${span - 1} DAY`
       const sinceDays = `created_at >= CURDATE() - INTERVAL ${days - 1} DAY`
       const paidSince = `COALESCE(paid_at, created_at) >= CURDATE() - INTERVAL ${days - 1} DAY`
+      // Orders paid with a Job Seeker Kit credit are revenue of the kit, not of the tool.
+      const notCredit = `COALESCE(paid_via, '') <> 'credit'`
       const num = (v) => Number(v) || 0
 
-      const [today, daily, pages, jobs, referrers, campaigns, devices, types, checkouts, resume, cover, prep, employer] = await Promise.all([
+      const [today, daily, pages, jobs, referrers, campaigns, devices, types, checkouts, resume, cover, prep, employer, bundle] =await Promise.all([
         q(`SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today`),
         q(`SELECT DATE_FORMAT(created_at, '%Y-%m-%d') AS day, COUNT(DISTINCT visitor_id) AS visitors, SUM(event_type = 'page_view') AS page_views
            FROM analytics_events WHERE ${since} GROUP BY day ORDER BY day`),
@@ -116,10 +118,11 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
         q(`SELECT device, COUNT(DISTINCT visitor_id) AS visitors FROM analytics_events WHERE ${sinceDays} GROUP BY device`),
         q(`SELECT event_type, COUNT(*) AS events, COUNT(DISTINCT session_id) AS sessions FROM analytics_events WHERE ${sinceDays} GROUP BY event_type`),
         q(`SELECT product, COUNT(*) AS starts FROM analytics_events WHERE event_type = 'checkout_start' AND ${sinceDays} GROUP BY product`),
-        q(`SELECT COUNT(*) AS orders FROM resume_checks WHERE payment_status = 'paid' AND ${paidSince}`),
-        q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM cover_letter_requests WHERE payment_status = 'paid' AND ${paidSince}`),
-        q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM interview_prep_requests WHERE payment_status = 'paid' AND ${paidSince}`),
+        q(`SELECT COUNT(*) AS orders FROM resume_checks WHERE payment_status = 'paid' AND ${notCredit} AND ${paidSince}`),
+        q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM cover_letter_requests WHERE payment_status = 'paid' AND ${notCredit} AND ${paidSince}`),
+        q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM interview_prep_requests WHERE payment_status = 'paid' AND ${notCredit} AND ${paidSince}`),
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(amount_cents), 0) AS cents FROM employer_pending_checkouts WHERE payment_status = 'paid' AND ${paidSince}`),
+        q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM bundle_orders WHERE status = 'paid' AND ${paidSince}`),
       ])
 
       const byType = Object.fromEntries(types.map((r) => [r.event_type, { events: num(r.events), sessions: num(r.sessions) }]))
@@ -136,6 +139,7 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
         cover_letter: { orders: num(cover[0]?.orders), cents: num(cover[0]?.cents) },
         interview_prep: { orders: num(prep[0]?.orders), cents: num(prep[0]?.cents) },
         employer_plan: { orders: num(employer[0]?.orders), cents: num(employer[0]?.cents) },
+        bundle: { orders: num(bundle[0]?.orders), cents: num(bundle[0]?.cents) },
       }
       const products = PRODUCTS.map((product) => ({
         product,

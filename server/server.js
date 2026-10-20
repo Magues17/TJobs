@@ -14,6 +14,7 @@ import { analyzeResume, previewFromFullReport } from './resumeAnalyzer.js'
 import { runAllScrapers } from './jobScraper.js'
 import { generateCoverLetter, generateInterviewPrep } from './aiService.js'
 import { registerAnalytics } from './analytics.js'
+import { registerBundles } from './bundles.js'
 import { register as registerJobAlerts } from './alerts.js'
 import { register as registerFacebook } from './facebook.js'
 import { createSeo } from './seo.js'
@@ -2713,6 +2714,12 @@ app.post('/api/square/webhook', async (req, res) => {
     const payment = paymentResponse?.payment
     if (!payment) {
       return res.status(200).json({ success: true, ignored: true })
+    }
+
+    // Job Seeker Kit payments ("bundle:<token>" note): grants the credits.
+    const bundleType = await bundles.tryHandlePayment(payment)
+    if (bundleType) {
+      return res.status(200).json({ success: true, type: bundleType })
     }
 
     // Resume checker webhook routing. Resume check checkouts encode a ref
@@ -6475,6 +6482,31 @@ function startAiOrder(productKey, orderId, options) {
   })
 }
 
+// The one place an AI order becomes paid and starts generating. Used by the
+// Square webhook and by Job Seeker Kit credits (paidVia: 'credit', onlyIfUnpaid:
+// true, so a credit can never re-pay an order). Returns true when it ran.
+async function markAiOrderPaid(productKey, row, { paymentId = null, squareOrderId = null, paidVia = null, onlyIfUnpaid = false } = {}) {
+  const product = AI_PRODUCTS[productKey]
+  const [result] = await pool.query(
+    `
+    UPDATE ${product.table}
+    SET
+      payment_status = 'paid',
+      paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+      square_payment_id = COALESCE(square_payment_id, ?),
+      square_order_id = COALESCE(square_order_id, ?),
+      ${paidVia ? 'paid_via = COALESCE(paid_via, ?),' : ''}
+      ai_status = ${aiStatusWhenPaidSql(product)}
+    WHERE id = ?${onlyIfUnpaid ? " AND payment_status <> 'paid'" : ''}
+    `,
+    [paymentId || null, squareOrderId || null, ...(paidVia ? [paidVia] : []), row.id]
+  )
+  if (onlyIfUnpaid && result?.affectedRows !== 1) return false
+
+  startAiOrder(productKey, row.id)
+  return true
+}
+
 // Called by the Square webhook with a payment fetched from the Square API.
 // Returns the product type when the payment note belongs to an AI order.
 // The order is only marked paid when Square says the payment is completed
@@ -6504,21 +6536,7 @@ async function tryHandleAiProductPayment(payment) {
     return productKey
   }
 
-  await pool.query(
-    `
-    UPDATE ${product.table}
-    SET
-      payment_status = 'paid',
-      paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
-      square_payment_id = COALESCE(square_payment_id, ?),
-      square_order_id = COALESCE(square_order_id, ?),
-      ai_status = ${aiStatusWhenPaidSql(product)}
-    WHERE id = ?
-    `,
-    [payment.id || null, payment.order_id || null, row.id]
-  )
-
-  startAiOrder(productKey, row.id)
+  await markAiOrderPaid(productKey, row, { paymentId: payment.id, squareOrderId: payment.order_id })
   return productKey
 }
 
@@ -6694,11 +6712,11 @@ app.get('/api/interview-prep/result/:token', (req, res) => handleAiOrderResult('
 
 const AI_ORDERS_SQL = `
   SELECT 'cover_letter' AS product, id, job_title, payment_status, ai_status, ai_error, ai_attempts,
-    price_cents, ai_input_tokens, ai_output_tokens, ai_cost_cents, created_at, paid_at
+    price_cents, ai_input_tokens, ai_output_tokens, ai_cost_cents, created_at, paid_at, paid_via
   FROM cover_letter_requests
   UNION ALL
   SELECT 'interview_prep' AS product, id, job_title, payment_status, ai_status, ai_error, ai_attempts,
-    price_cents, ai_input_tokens, ai_output_tokens, ai_cost_cents, created_at, paid_at
+    price_cents, ai_input_tokens, ai_output_tokens, ai_cost_cents, created_at, paid_at, paid_via
   FROM interview_prep_requests
 `
 
@@ -6726,11 +6744,11 @@ app.get('/api/admin/ai-orders', requireAdminAuth, async (req, res) => {
         SELECT
           product,
           SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END) AS paid_orders,
-          SUM(CASE WHEN payment_status = 'paid' THEN price_cents ELSE 0 END) AS sales_cents,
+          SUM(CASE WHEN payment_status = 'paid' AND COALESCE(paid_via, '') <> 'credit' THEN price_cents ELSE 0 END) AS sales_cents,
           SUM(ai_cost_cents) AS ai_cost_cents,
           SUM(CASE WHEN payment_status = 'paid' AND ai_status = 'failed' THEN 1 ELSE 0 END) AS failed_orders,
           SUM(CASE WHEN payment_status = 'paid' AND COALESCE(paid_at, created_at) >= ? THEN 1 ELSE 0 END) AS month_paid_orders,
-          SUM(CASE WHEN payment_status = 'paid' AND COALESCE(paid_at, created_at) >= ? THEN price_cents ELSE 0 END) AS month_sales_cents,
+          SUM(CASE WHEN payment_status = 'paid' AND COALESCE(paid_at, created_at) >= ? AND COALESCE(paid_via, '') <> 'credit' THEN price_cents ELSE 0 END) AS month_sales_cents,
           SUM(CASE WHEN COALESCE(paid_at, created_at) >= ? THEN ai_cost_cents ELSE 0 END) AS month_ai_cost_cents
         FROM (${AI_ORDERS_SQL}) orders
         GROUP BY product
@@ -6854,6 +6872,48 @@ const jobAlerts = registerJobAlerts({
 
 // Facebook Page auto-post: inert unless FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN are set.
 const facebook = registerFacebook({ app, pool, requireAdminAuth, formatPay: formatPayDisplay, APP_BASE_URL })
+// Job Seeker Kit ($12.99: one Resume Check + Cover Letter + Interview Prep).
+// Redeeming a credit marks the tool's own order paid via the same functions
+// the Square webhook uses (markAiOrderPaid / the resume check paid UPDATE).
+const BUNDLE_PRICE_CENTS = Number.parseInt(process.env.BUNDLE_PRICE_CENTS, 10) > 0 ? Number.parseInt(process.env.BUNDLE_PRICE_CENTS, 10) : 1299
+function aiRedeemTarget(productKey) {
+  const product = AI_PRODUCTS[productKey]
+  return {
+    find: (token) => findAiOrderByToken(product, token),
+    markPaid: (row) => markAiOrderPaid(productKey, row, { paymentId: 'kit-credit', paidVia: 'credit', onlyIfUnpaid: true }),
+    resultUrl: (token) => buildAiResultUrl(product, token),
+  }
+}
+const bundles = registerBundles({
+  app,
+  pool,
+  safeTrim,
+  createIpRateLimiter,
+  getRequestIp,
+  requireAdminAuth,
+  createSquareQuickPayLink,
+  APP_BASE_URL,
+  devBypass: RESUME_CHECKER_DEV_BYPASS,
+  priceCents: BUNDLE_PRICE_CENTS,
+  targets: {
+    resume_check: {
+      find: findResumeCheckByToken,
+      markPaid: async (row) => {
+        const [result] = await pool.query(
+          `UPDATE resume_checks
+           SET payment_status = 'paid', paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+               square_payment_id = COALESCE(square_payment_id, 'kit-credit'), paid_via = 'credit'
+           WHERE id = ? AND payment_status <> 'paid'`,
+          [row.id]
+        )
+        return result?.affectedRows === 1
+      },
+      resultUrl: buildResumeReportUrl,
+    },
+    cover_letter: aiRedeemTarget('cover_letter'),
+    interview_prep: aiRedeemTarget('interview_prep'),
+  },
+})
 
 if (fs.existsSync(frontendIndexFile)) {
   // HTML pages get a per-route <head> (title, canonical, JSON-LD); see seo.js.
@@ -6920,6 +6980,7 @@ async function startServer() {
   await ensureCoverLetterTable().catch((error) => console.error('STARTUP: cover letter table setup failed:', error?.message || error))
   await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))
   await analytics.ensureTable().catch((error) => console.error('STARTUP: analytics table setup failed:', error?.message || error))
+  await bundles.ensureTables().catch((error) => console.error('STARTUP: bundle tables setup failed:', error?.message || error))
   await jobAlerts.ensureTables().catch((error) => console.error('STARTUP: job alert tables setup failed:', error?.message || error))
   await facebook.ensureTable().catch((error) => console.error('STARTUP: facebook table setup failed:', error?.message || error))
   await expireOpenJobs()

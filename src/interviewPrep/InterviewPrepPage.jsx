@@ -11,6 +11,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { track } from '../lib/track'
+import KitPaywallExtras from '../bundle/KitBits'
 import { Loader2, CheckCircle2, Lock, ChevronDown, ChevronUp, ArrowLeft, Sparkles } from 'lucide-react'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
@@ -317,6 +318,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onPaid }) {
       </div>
 
       <ErrorBox message={error} />
+      <KitPaywallExtras product="interview_prep" orderToken={publicToken} />
 
       {timedOut ? (
         <div className="text-xs text-slate-400">Still waiting for your payment to confirm — refresh this page in a minute.</div>

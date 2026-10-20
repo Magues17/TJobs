@@ -59,6 +59,7 @@ import { humanizeJobType } from './employer/utils'
 import ResumeCheckerPage from './resumeChecker/ResumeCheckerPage'
 import CoverLetterPage from './coverLetter/CoverLetterPage'
 import InterviewPrepPage from './interviewPrep/InterviewPrepPage'
+import BundlePage from './bundle/BundlePage'
 import {
   employerIndustries,
   employerJobTypes,
@@ -106,7 +107,7 @@ const adminPages = ['admin-login', 'admin-dashboard']
 const resumeCheckerPages = ['resume-checker', 'resume-report']
 const coverLetterPages = ['cover-letter', 'cover-letter-result']
 const interviewPrepPages = ['interview-prep', 'interview-prep-result']
-const aiToolPages = [...resumeCheckerPages, ...coverLetterPages, ...interviewPrepPages]
+const aiToolPages = [...resumeCheckerPages, ...coverLetterPages, ...interviewPrepPages, 'bundle']
 const alertPages = ['alerts-confirm', 'alerts-unsubscribe']
 const LEGAL_LAST_UPDATED = 'April 18, 2026'
 
@@ -2748,6 +2749,7 @@ export default function TarboroJobsHomepage() {
       {currentPage === 'interview-prep-result' && (
         <InterviewPrepPage initialMode="paywall" onBack={() => navigateToPage('jobs', null)} />
       )}
+      {currentPage === 'bundle' && <BundlePage />}
       {alertPages.includes(currentPage) && <AlertPage page={currentPage} />}
       {currentPage === 'list-business' && <ListBusinessPage />}
       {currentPage === 'employer-login' && (

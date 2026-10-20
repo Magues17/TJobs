@@ -12,6 +12,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { track } from '../lib/track'
+import KitPaywallExtras from '../bundle/KitBits'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -355,6 +356,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onUnlocked }) 
       </div>
 
       <ErrorBox message={error} />
+      <KitPaywallExtras product="cover_letter" orderToken={publicToken} />
 
       {timedOut ? (
         <div className="text-xs text-slate-400">Still waiting for your payment to confirm — refresh this page in a minute.</div>
