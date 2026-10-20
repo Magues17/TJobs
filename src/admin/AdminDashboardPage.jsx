@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { getStoredAdminApiKey } from './auth'
 import { getStoredEmployerToken } from '../employer/auth'
+import ReviewQueuePanel from './ReviewQueuePanel'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -210,6 +211,14 @@ function AiProductsPanel({ Card, refreshKey }) {
           </div>
         ))}
       </div>
+
+      {summary?.job_drafts ? (
+        <div className="rounded-2xl border border-slate-800 bg-slate-950/55 px-4 py-3 text-sm text-slate-300">
+          Employer "Write it for me" job drafts (free, verified employers only): {summary.job_drafts.this_month.drafts} this month
+          ({formatAiCost(summary.job_drafts.this_month.ai_cost_cents)} AI cost), {summary.job_drafts.all_time.drafts} all time
+          ({formatAiCost(summary.job_drafts.all_time.ai_cost_cents)}).
+        </div>
+      ) : null}
 
       {failedOrders > 0 ? (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
@@ -582,6 +591,8 @@ export default function AdminDashboardPage({
           </div>
         ))}
       </div>
+
+      <ReviewQueuePanel Card={Card} refreshKey={aiRefreshKey} />
 
       <AnalyticsPanel Card={Card} refreshKey={aiRefreshKey} />
 

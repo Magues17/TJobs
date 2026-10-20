@@ -32,6 +32,8 @@ import {
 } from './utils'
 import { clearStoredEmployerToken, getStoredEmployerToken } from './auth'
 import { EMPLOYER_AUTH_EXPIRED_EVENT } from './api'
+import { AiDraftButton, JobStatusBadge, PayForJobButton } from './SelfServe'
+import { track } from '../lib/track'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -266,6 +268,9 @@ export default function EmployerDashboardPage({
   CandidateActionPanel,
 }) {
   const employer = employerSession?.employer
+  // Self-serve employers without the monthly plan: free first post, then $29
+  // per post; no applicant search or candidate pipeline.
+  const payPerPost = employer?.plan === 'pay_per_post' && !employer?.has_subscription_features
   const selectedCandidateAction = selectedResume ? candidateActions[selectedResume.id] || null : null
   const [activeSection, setActiveSection] = useState('overview')
 
@@ -450,10 +455,15 @@ export default function EmployerDashboardPage({
 
       if (editingJobId) {
         await onUpdateJob(editingJobId, payload)
-        setJobMessage('Job updated successfully. Open listings auto-expire after 14 days.')
+        setJobMessage(payPerPost ? 'Job updated successfully.' : 'Job updated successfully. Open listings auto-expire after 14 days.')
       } else {
-        await onCreateJob(payload)
-        setJobMessage('Job posted successfully. It will auto-expire after 14 days.')
+        const created = await onCreateJob(payload)
+        if (created?.checkout_url) {
+          track('checkout_start', { product: 'job_post' })
+          window.location.assign(created.checkout_url)
+          return
+        }
+        setJobMessage(created?.message || 'Job posted successfully. It will auto-expire after 14 days.')
       }
 
       setJobForm(getEmptyJobForm(employer?.city || 'Tarboro, NC'))
@@ -743,6 +753,13 @@ export default function EmployerDashboardPage({
                 </Field>
 
                 <Field label="Job Description" required>
+                  <div className="mb-2">
+                    <AiDraftButton
+                      title={jobForm.job_title}
+                      notes={jobForm.job_description}
+                      onDraft={(description) => setJobForm((prev) => ({ ...prev, job_description: description }))}
+                    />
+                  </div>
                   <textarea
                     name="job_description"
                     rows={6}
@@ -829,18 +846,24 @@ export default function EmployerDashboardPage({
                   </Field>
                 </div>
 
-                <Field label="Status">
-                  <select name="status" value={jobForm.status} onChange={handleJobFormChange} className={inputClassName()}>
-                    {['open', 'draft', 'closed', 'filled'].map((value) => (
-                      <option key={value} value={value}>{humanizeStatus(value)}</option>
-                    ))}
-                  </select>
-                </Field>
+                {payPerPost ? (
+                  <div className="rounded-[26px] border border-cyan-400/20 bg-cyan-400/10 p-4 text-sm leading-6 text-cyan-50/90">
+                    Your first post is free and goes live after a quick review. Each post after that is $29 and stays live for 30 days. Hiring often? The $49/month plan includes unlimited posts.
+                  </div>
+                ) : (
+                  <Field label="Status">
+                    <select name="status" value={jobForm.status} onChange={handleJobFormChange} className={inputClassName()}>
+                      {['open', 'draft', 'closed', 'filled'].map((value) => (
+                        <option key={value} value={value}>{humanizeStatus(value)}</option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
 
                 <div className="rounded-[26px] border border-amber-400/20 bg-amber-400/10 p-4 text-sm text-amber-100">
                   <div className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">Posting rules built into TarboroJobs</div>
                   <ul className="mt-3 space-y-2 text-sm leading-6 text-amber-50/90">
-                    <li>• Open jobs auto-expire 14 days after they go live.</li>
+                    <li>• {payPerPost ? 'Posts stay live for 30 days.' : 'Open jobs auto-expire 14 days after they go live.'}</li>
                     <li>• Do not post discriminatory language about age, sex, religion, disability, pregnancy, citizenship status, or national origin.</li>
                     <li>• Do not ask applicants for money, bank details, Social Security numbers, Telegram/WhatsApp contact, or crypto payments in the posting.</li>
                     <li>• TarboroJobs may remove or reject listings that break these rules.</li>
@@ -899,8 +922,11 @@ export default function EmployerDashboardPage({
                             <span>•</span>
                             <span>{humanizeJobType(job.employment_type)}</span>
                             <span>•</span>
-                            <span>{humanizeStatus(job.status)}</span>
+                            <JobStatusBadge status={job.status} fallback={humanizeStatus(job.status)} />
                           </div>
+                          {job.status === 'rejected' && job.review_note ? (
+                            <div className="mt-2 text-xs leading-5 text-rose-300">Needs changes: {job.review_note} Post it again with the changes and it stays free.</div>
+                          ) : null}
                         </div>
 
                         <div className="flex flex-wrap gap-2">
@@ -912,10 +938,13 @@ export default function EmployerDashboardPage({
                             <Trash2 className="h-3.5 w-3.5" /> {deletingJobId === job.id ? 'Deleting...' : 'Delete'}
                           </button>
 
+                          {payPerPost ? <PayForJobButton job={job} /> : null}
+                          {payPerPost && job.status !== 'open' ? null : <>
                           {job.status !== 'open' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'open')} className="inline-flex items-center gap-1.5 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/15"><CheckCircle2 className="h-3.5 w-3.5" /> Renew 14 Days</button> : null}
                           {job.status !== 'filled' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'filled')} className="inline-flex items-center gap-1.5 rounded-2xl border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-300 transition hover:bg-cyan-500/15"><CheckCircle2 className="h-3.5 w-3.5" /> Filled</button> : null}
                           {job.status !== 'closed' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'closed')} className="inline-flex items-center gap-1.5 rounded-2xl border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 transition hover:bg-rose-500/15"><XCircle className="h-3.5 w-3.5" /> Close</button> : null}
-                          {job.status !== 'draft' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'draft')} className="inline-flex items-center gap-1.5 rounded-2xl border border-slate-700 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600"><PencilLine className="h-3.5 w-3.5" /> Draft</button> : null}
+                          {!payPerPost && job.status !== 'draft' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'draft')} className="inline-flex items-center gap-1.5 rounded-2xl border border-slate-700 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600"><PencilLine className="h-3.5 w-3.5" /> Draft</button> : null}
+                          </>}
                         </div>
                       </div>
 
@@ -949,7 +978,7 @@ export default function EmployerDashboardPage({
               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                 <div className="flex flex-wrap gap-3">
                   <TabButton icon={Users} label="All Candidates" active={candidateView === 'all'} onClick={() => onCandidateViewChange('all')} />
-                  <TabButton icon={Bookmark} label="Reviewed Candidates" active={candidateView === 'reviewed'} onClick={() => onCandidateViewChange('reviewed')} />
+                  {payPerPost ? null : <TabButton icon={Bookmark} label="Reviewed Candidates" active={candidateView === 'reviewed'} onClick={() => onCandidateViewChange('reviewed')} />}
                 </div>
 
                 <div className="text-sm text-slate-400">
@@ -958,12 +987,14 @@ export default function EmployerDashboardPage({
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
-                {showingReviewedOnly
+                {payPerPost
+                  ? 'You can see everyone who applied to your posts. Applicant search, filters and the hiring pipeline come with the $49/month plan.'
+                  : showingReviewedOnly
                   ? 'Showing only candidates currently in the Reviewed stage.'
                   : 'Submitted resumes may be viewed by active employers on TarboroJobs.com. Use the hiring pipeline below to sort applicants by stage.'}
               </div>
 
-              {!showingReviewedOnly ? (
+              {!showingReviewedOnly && !payPerPost ? (
                 <div className="grid gap-3 lg:grid-cols-5">
                   {candidatePipeline.map((stage) => {
                     const active = resumeFilters.candidate_status === stage.key
@@ -986,6 +1017,7 @@ export default function EmployerDashboardPage({
                 </div>
               ) : null}
 
+              {payPerPost ? null : (
               <div className={`grid gap-4 ${showingReviewedOnly ? 'md:grid-cols-[1fr_220px_220px]' : 'md:grid-cols-[1fr_220px_220px_220px]'}`}>
                 <div className="flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
                   <Search className="h-4 w-4 text-slate-500" />
@@ -1020,6 +1052,7 @@ export default function EmployerDashboardPage({
                   </select>
                 ) : null}
               </div>
+              )}
 
               <div className="grid gap-6 xl:grid-cols-[340px_1fr]">
                 <div className="space-y-3">
@@ -1149,7 +1182,7 @@ export default function EmployerDashboardPage({
                         </div>
                       </section>
 
-                      <CandidateActionPanel
+                      {payPerPost ? null : <CandidateActionPanel
                         selectedResume={selectedResume}
                         candidateAction={selectedCandidateAction}
                         actionLoading={actionLoading}
@@ -1157,7 +1190,7 @@ export default function EmployerDashboardPage({
                         actionError={actionError}
                         onSaveAction={onSaveCandidateAction}
                         candidateStatuses={candidateStatuses}
-                      />
+                      />}
                     </>
                   )}
                 </div>
@@ -1261,7 +1294,8 @@ export default function EmployerDashboardPage({
               <section className={panelClassName()}>
                 <PanelHeader icon={ShieldCheck} title="Account Status" subtitle="Subscription and access details in one clean card." />
                 <div className="space-y-3 p-5 text-sm text-slate-300">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Subscription Status:</span> {employer?.subscription_status || '—'}</div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Plan:</span> {payPerPost ? 'Pay per post ($29 a post)' : 'Monthly plan'}</div>
+                  {payPerPost ? null : <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Subscription Status:</span> {employer?.subscription_status || '—'}</div>}
                   <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Access Status:</span> {employer?.access_status || '—'}</div>
                   <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Hiring Status:</span> {employer?.status === 'active' ? 'Hiring' : 'Not hiring'}</div>
                   <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Current Period End:</span> {employer?.current_period_end ? formatShortDate(employer.current_period_end) : '—'}</div>

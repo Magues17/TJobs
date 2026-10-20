@@ -198,3 +198,34 @@ export async function saveCandidateAction(tokenOverride, payload = {}) {
     }),
   })
 }
+
+export async function signupEmployer(payload) {
+  return requestJson(`${API_BASE}/employer-auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function verifyEmployerEmail(token) {
+  return requestJson(`${API_BASE}/employer-auth/verify-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  })
+}
+
+export async function startEmployerJobPayment(tokenOverride, jobId) {
+  return requestJson(`${API_BASE}/employer/jobs/${jobId}/pay`, {
+    method: 'POST',
+    headers: buildAuthHeaders(tokenOverride, true),
+  })
+}
+
+export async function draftJobDescription(tokenOverride, payload) {
+  return requestJson(`${API_BASE}/employer/jobs/ai-draft`, {
+    method: 'POST',
+    headers: buildAuthHeaders(tokenOverride, true),
+    body: JSON.stringify(payload),
+  })
+}

@@ -129,3 +129,26 @@ Requirements:
     throw errorWithUsage(`Could not read the interview prep reply: ${error.message}`, usage);
   }
 }
+
+// Polished job description from a title and the employer's rough notes.
+// Only facts from the notes are used, so pay, schedule and benefits are never
+// invented; the posting guidelines' banned phrasing is spelled out too.
+export async function generateJobDescription({ jobTitle, notes, businessName, city }) {
+  const prompt = `Write a job description for a ${jobTitle} position${businessName ? ` at ${businessName}` : ''}${city ? ` in ${city}` : ''}, to be posted on a local job board for Tarboro and Edgecombe County, North Carolina.
+
+Employer's notes (the only facts you may use):
+${notes || '(none)'}
+
+Requirements:
+- Plain text, no markdown symbols like # or **
+- Short intro paragraph, then "Responsibilities:" and "Requirements:" sections with lines starting "- "
+- 150-300 words, friendly and clear for local job seekers
+- Do not invent pay, hours, benefits or contact details that are not in the notes
+- Never mention age, sex, religion, disability, pregnancy, citizenship or national origin preferences, application fees, bank details, SSN, Telegram, WhatsApp or crypto
+- Return only the description`;
+
+  const { text, usage } = await callClaude(prompt, 1024);
+  const description = text.trim();
+  if (!description) throw errorWithUsage('Anthropic returned an empty job description', usage);
+  return { description, usage };
+}
