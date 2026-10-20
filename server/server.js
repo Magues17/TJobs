@@ -5798,7 +5798,8 @@ let scrapeRunning = false
 
 async function getLastScrapeAt() {
   const [rows] = await pool.query(
-    `SELECT MAX(updated_at) AS last_scrape_at FROM job_posts WHERE source IN (?)`,
+    // expireOpenJobs also bumps updated_at, so expired rows don't count as a scrape.
+    `SELECT MAX(updated_at) AS last_scrape_at FROM job_posts WHERE source IN (?) AND status <> 'expired'`,
     [SCRAPE_SOURCES]
   )
   return rows[0]?.last_scrape_at || null
