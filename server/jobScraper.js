@@ -32,13 +32,23 @@ function inferEmploymentType(title, text = '') {
   return best?.type ?? 'full-time'
 }
 
+const NAMED_ENTITIES = { nbsp: ' ', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
+
+function decodeEntities(s) {
+  return s.replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi, (m, dec, hex, name) => {
+    if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? m
+    const code = dec ? parseInt(dec, 10) : parseInt(hex, 16)
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m
+  })
+}
+
 function stripTags(html) {
-  return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+  return decodeEntities(html.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim()
 }
 
 async function fetchPdfText(url) {
   try {
-    const res = await fetch(url)
+    const res = await fetch(url, { signal: AbortSignal.timeout(30000) })
     if (!res.ok) return null
     const mod = await import('pdf-parse')
     const pdfParse = mod.default || mod
@@ -79,7 +89,7 @@ async function addPdfDescriptions(jobs) {
 // ── Edgecombe County ──────────────────────────────────────────────────────────
 
 export async function scrapeEdgecombeCounty() {
-  const res = await fetch('https://www.edgecombecountync.gov/departments/human_resources/job_openings.php')
+  const res = await fetch('https://www.edgecombecountync.gov/departments/human_resources/job_openings.php', { signal: AbortSignal.timeout(30000) })
   if (!res.ok) throw new Error(`Edgecombe fetch failed: ${res.status}`)
   const html = await res.text()
 
@@ -132,13 +142,13 @@ export async function scrapeEdgecombeCounty() {
 // ── Tarboro ───────────────────────────────────────────────────────────────────
 
 export async function scrapeTarboro() {
-  const res = await fetch('https://www.tarboro-nc.com/departments/human_resources.php')
+  const res = await fetch('https://www.tarboro-nc.com/departments/human_resources.php', { signal: AbortSignal.timeout(30000) })
   if (!res.ok) throw new Error(`Tarboro fetch failed: ${res.status}`)
   const html = await res.text()
 
   // Isolate the jobs table body
   const tableMatch = html.match(/<table[^>]*id="jobs-table"[^>]*>([\s\S]*?)<\/table>/i)
-  if (!tableMatch) return []
+  if (!tableMatch) throw new Error('Tarboro jobs table not found; page layout may have changed')
 
   const jobs = []
   const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi
@@ -203,6 +213,7 @@ export async function fetchUSAJOBS() {
       'User-Agent': userAgent || 'TarboroJobs/1.0',
       'Authorization-Key': apiKey,
     },
+    signal: AbortSignal.timeout(30000),
   })
   if (!res.ok) throw new Error(`USAJOBS fetch failed: ${res.status}`)
   const data = await res.json()
@@ -235,6 +246,8 @@ export async function fetchUSAJOBS() {
       pay_type: USAJOBS_PAY_TYPES[rem.RateIntervalCode] ?? null,
     })
   }
+  // ponytail: one page only; if the API has more, flag it so the close step is skipped
+  jobs.partial = Number(data?.SearchResult?.SearchResultCountAll) > (data?.SearchResult?.SearchResultCount ?? items.length)
   return jobs
 }
 
@@ -269,6 +282,7 @@ const UPSERT_SQL = `
     pay_min         = COALESCE(VALUES(pay_min), pay_min),
     pay_max         = COALESCE(VALUES(pay_max), pay_max),
     pay_type        = COALESCE(VALUES(pay_type), pay_type),
+    status          = IF(status = 'closed', 'open', status),
     updated_at      = NOW()
 `
 
@@ -338,14 +352,13 @@ export async function runAllScrapers(pool) {
       continue
     }
 
-    const seen = []
+    const seen = jobs.map(j => j.external_id)
     for (const job of jobs) {
       try {
         const employerId = await getEmployerId(pool, job.company, employerCache)
         const outcome = await upsertJob(pool, job, employerId)
         if (outcome === 'imported') imported++
         else updated++
-        seen.push(job.external_id)
       } catch (err) {
         errors.push({ source: name, job: job.external_id, error: err.message })
       }
@@ -353,7 +366,7 @@ export async function runAllScrapers(pool) {
 
     // Close postings the source no longer lists (filled/withdrawn). Skip if the fetch came back
     // empty, so a source outage or layout change can't wipe every listing.
-    if (seen.length) {
+    if (seen.length && !jobs.partial) {
       const [res] = await pool.query(
         `UPDATE job_posts SET status = 'closed', updated_at = NOW()
          WHERE source = ? AND status = 'open' AND external_id NOT IN (?)`,

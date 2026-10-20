@@ -56,7 +56,7 @@ async function callClaude(prompt, maxTokens = 1024) {
     outputTokens,
     costCents: estimateAiCostCents({ model: AI_MODEL, inputTokens, outputTokens }),
   };
-  return { text: data?.content?.[0]?.text || '', usage };
+  return { text: data?.content?.[0]?.text || '', usage, stopReason: data?.stop_reason };
 }
 
 // Errors raised after Anthropic answered carry the usage, so the caller can
@@ -119,7 +119,10 @@ Requirements:
 - Answers 2-3 sentences each
 - Mix of behavioral, technical, and situational questions`;
 
-  const { text, usage } = await callClaude(prompt, 2048);
+  const { text, usage, stopReason } = await callClaude(prompt, 3000);
+  if (stopReason === 'max_tokens') {
+    throw errorWithUsage('Interview prep reply was cut off (hit the max_tokens limit)', usage);
+  }
   try {
     return { questions: parseInterviewQuestions(text), usage };
   } catch (error) {

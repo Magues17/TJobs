@@ -30,7 +30,8 @@ import {
   humanizeStatus,
   humanizePayType,
 } from './utils'
-import { getStoredEmployerToken } from './auth'
+import { clearStoredEmployerToken, getStoredEmployerToken } from './auth'
+import { EMPLOYER_AUTH_EXPIRED_EVENT } from './api'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -42,6 +43,10 @@ async function downloadResumeFile(resumeFileUrl) {
   const response = await fetch(`${API_BASE}/employer/resume-files/${encodeURIComponent(name)}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
+  if (response.status === 401) {
+    clearStoredEmployerToken()
+    window.dispatchEvent(new Event(EMPLOYER_AUTH_EXPIRED_EVENT))
+  }
   if (!response.ok) throw new Error('Could not load this resume.')
 
   const url = URL.createObjectURL(await response.blob())

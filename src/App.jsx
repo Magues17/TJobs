@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Briefcase,
   Building2,
@@ -32,6 +32,7 @@ import {
   updateEmployerJobStatus as apiUpdateEmployerJobStatus,
   deleteEmployerJob as apiDeleteEmployerJob,
   saveCandidateAction as apiSaveCandidateAction,
+  EMPLOYER_AUTH_EXPIRED_EVENT,
 } from './employer/api'
 import {
   getStoredEmployerToken,
@@ -1210,6 +1211,19 @@ function SubmitResumePage({ job, loading, error, onBack }) {
       return
     }
 
+    if (!resumeFile) {
+      setErrorMessage('Please attach your resume as a PDF.')
+      return
+    }
+    if (resumeFile.type !== 'application/pdf' && !/\.pdf$/i.test(resumeFile.name)) {
+      setErrorMessage('Your resume must be a PDF file.')
+      return
+    }
+    if (resumeFile.size > 10 * 1024 * 1024) {
+      setErrorMessage('Your resume PDF is larger than 10 MB. Please upload a smaller file.')
+      return
+    }
+
     setSubmitting(true)
     setMessage('')
     setErrorMessage('')
@@ -1258,6 +1272,34 @@ function SubmitResumePage({ job, loading, error, onBack }) {
         <SectionHeader title="Apply for this job" subtitle="Loading the job before we send your application..." />
         <Card title="Please wait">
           <p className="text-sm text-slate-400">Fetching the latest job details.</p>
+        </Card>
+      </div>
+    )
+  }
+
+  if (/^https?:\/\//i.test(job?.source_url || '')) {
+    return (
+      <div className="mx-auto max-w-4xl">
+        <SectionHeader title={`Apply for ${job.title}`} subtitle={job.company} />
+        <Card title="Apply on the official site">
+          <div className="space-y-4">
+            <p className="text-sm leading-6 text-slate-400">This employer takes applications on their official site.</p>
+            <a
+              href={job.source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+            >
+              View official posting
+            </a>
+            <button
+              type="button"
+              onClick={onBack}
+              className="ml-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-600"
+            >
+              Back to job page
+            </button>
+          </div>
         </Card>
       </div>
     )
@@ -1326,6 +1368,7 @@ function SubmitResumePage({ job, loading, error, onBack }) {
           <div className="grid gap-5 md:grid-cols-2">
             <Field label="Full Name" required>
               <Input
+                required
                 value={form.full_name}
                 onChange={(e) => updateField('full_name', e.target.value)}
                 placeholder="Jane Doe"
@@ -1335,6 +1378,7 @@ function SubmitResumePage({ job, loading, error, onBack }) {
             <Field label="Email Address" required>
               <Input
                 type="email"
+                required
                 value={form.email}
                 onChange={(e) => updateField('email', e.target.value)}
                 placeholder="jane@example.com"
@@ -1401,6 +1445,7 @@ function SubmitResumePage({ job, loading, error, onBack }) {
           <Field label="Resume PDF" required>
             <Input
               type="file"
+              required
               accept=".pdf,application/pdf"
               onChange={(e) => setResumeFile(e.target.files?.[0] || null)}
               className="file:mr-3 file:rounded-xl file:border-0 file:bg-cyan-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950"
@@ -1421,10 +1466,10 @@ function SubmitResumePage({ job, loading, error, onBack }) {
 
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || Boolean(message)}
             className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
           >
-            {submitting ? 'Submitting...' : 'Submit Application'}
+            {submitting ? 'Submitting...' : message ? 'Application Submitted' : 'Submit Application'}
           </button>
         </form>
       </Card>
@@ -1447,6 +1492,11 @@ function EmployerPaymentSuccessPage({ setCurrentPage }) {
   useEffect(() => {
     let active = true
     let timeoutId = null
+    let failures = 0
+    const startedAt = Date.now()
+    const MAX_FAILURES = 5
+    const MAX_POLL_MS = 5 * 60 * 1000
+    const STILL_PROCESSING = 'This is taking longer than usual. Your payment may still be processing. Refresh this page in a minute, or contact jobs@tarborojobs.com if it does not finish.'
 
     async function loadStatus() {
       if (!checkoutRef) {
@@ -1471,14 +1521,25 @@ function EmployerPaymentSuccessPage({ setCurrentPage }) {
         setOnboardingUrl(data.onboarding_url || '')
         setEmailSent(typeof data.email_sent === 'boolean' ? data.email_sent : null)
         setError('')
+        failures = 0
 
         if (['loading', 'awaiting_payment_confirmation', 'payment_verified'].includes(data.status)) {
+          if (Date.now() - startedAt > MAX_POLL_MS) {
+            setStatus('error')
+            setError(STILL_PROCESSING)
+            return
+          }
           timeoutId = window.setTimeout(loadStatus, 3000)
         }
       } catch (err) {
         if (!active) return
+        failures += 1
+        if (failures < MAX_FAILURES && Date.now() - startedAt <= MAX_POLL_MS) {
+          timeoutId = window.setTimeout(loadStatus, 3000)
+          return
+        }
         setStatus('error')
-        setError(err.message || 'Unable to verify your checkout yet.')
+        setError(failures >= MAX_FAILURES ? `${err.message || 'Unable to verify your checkout yet.'} ${STILL_PROCESSING}` : STILL_PROCESSING)
       }
     }
 
@@ -1755,7 +1816,11 @@ export default function TarboroJobsHomepage() {
   const [jobsLoading, setJobsLoading] = useState(true)
   const [businessesLoading, setBusinessesLoading] = useState(true)
   const [publicJobDetail, setPublicJobDetail] = useState(null)
-  const [publicJobLoading, setPublicJobLoading] = useState(false)
+  const [publicJobLoading, setPublicJobLoading] = useState(
+    Boolean(initialRoute.jobId) && ['job-detail', 'job-apply'].includes(initialRoute.page)
+  )
+  const publicJobRequestRef = useRef(0)
+  const [sessionError, setSessionError] = useState('')
   const [publicJobError, setPublicJobError] = useState('')
   const [employerSession, setEmployerSession] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -1864,6 +1929,8 @@ export default function TarboroJobsHomepage() {
       return
     }
 
+    const requestId = ++publicJobRequestRef.current
+
     try {
       setPublicJobLoading(true)
       setPublicJobError('')
@@ -1874,12 +1941,14 @@ export default function TarboroJobsHomepage() {
         throw new Error(data.error || 'Failed to load job details.')
       }
 
+      if (requestId !== publicJobRequestRef.current) return
       setPublicJobDetail(data.job || null)
     } catch (error) {
+      if (requestId !== publicJobRequestRef.current) return
       setPublicJobDetail(null)
       setPublicJobError(error.message || 'Failed to load job details.')
     } finally {
-      setPublicJobLoading(false)
+      if (requestId === publicJobRequestRef.current) setPublicJobLoading(false)
     }
   }
 
@@ -2045,6 +2114,7 @@ export default function TarboroJobsHomepage() {
 
   async function loadEmployerSession(tokenOverride) {
     const token = tokenOverride || getStoredEmployerToken()
+    setSessionError('')
 
     if (!token) {
       setEmployerSession(null)
@@ -2096,8 +2166,13 @@ export default function TarboroJobsHomepage() {
       }
     } catch (error) {
       console.error('Failed to load employer session:', error)
-      clearStoredEmployerToken()
       setEmployerSession(null)
+      if (error?.status !== 401 && error?.status !== 403) {
+        // Network error / 5xx: keep the token so a retry (or refresh) can recover.
+        setSessionError('We could not reach TarboroJobs to check your employer login. Your session is still saved.')
+        return
+      }
+      clearStoredEmployerToken()
       if (!getStoredAdminApiKey()) {
         setAdminSession(null)
         setAdminOverview({})
@@ -2446,6 +2521,15 @@ export default function TarboroJobsHomepage() {
   }
 
   useEffect(() => {
+    function handleAuthExpired() {
+      handleLogout()
+      setCurrentPage('employer-login')
+    }
+    window.addEventListener(EMPLOYER_AUTH_EXPIRED_EVENT, handleAuthExpired)
+    return () => window.removeEventListener(EMPLOYER_AUTH_EXPIRED_EVENT, handleAuthExpired)
+  }, [])
+
+  useEffect(() => {
     loadBusinesses()
     loadJobs()
     loadEmployerSession()
@@ -2472,6 +2556,8 @@ export default function TarboroJobsHomepage() {
       return
     }
 
+    setPublicJobDetail((prev) => (prev && Number(prev.id) === Number(selectedPublicJobId) ? prev : null))
+    setPublicJobLoading(true)
     loadPublicJobDetail(selectedPublicJobId)
   }, [currentPage, selectedPublicJobId])
 
@@ -2501,6 +2587,18 @@ export default function TarboroJobsHomepage() {
       adminSession={adminSession}
       onLogout={handleLogout}
     >
+      {sessionError && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <span>{sessionError}</span>
+          <button
+            type="button"
+            onClick={() => loadEmployerSession()}
+            className="rounded-xl bg-amber-300 px-3 py-1.5 text-xs font-semibold text-slate-950 transition hover:bg-amber-200"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {currentPage === 'jobs' && (
         <JobsPage jobs={jobs} loading={jobsLoading} onViewJob={(jobId) => navigateToPage('job-detail', jobId)} />
       )}
@@ -2607,7 +2705,11 @@ export default function TarboroJobsHomepage() {
       )}
       {currentPage === 'employer-reset-password' && (
         <EmployerResetPasswordPage
-          setCurrentPage={setCurrentPage}
+          setCurrentPage={(page) => {
+            // Drop the one-time reset token from the URL once we leave this page.
+            if (page === 'employer-login') window.history.replaceState({}, '', '/')
+            setCurrentPage(page)
+          }}
           SectionHeader={SectionHeader}
           Card={Card}
           Field={Field}

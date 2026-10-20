@@ -12,7 +12,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 
-const API = import.meta.env.VITE_API_BASE || ''
+const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
 // ---------- Shared UI primitives (match site style) -------------------------
 
@@ -92,7 +92,7 @@ function CoverLetterForm({ onGenerated }) {
 
     try {
       setSubmitting(true)
-      const res = await fetch(`${API}/api/cover-letter/generate`, {
+      const res = await fetch(`${API_BASE}/cover-letter/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fullName, jobTitle, jobDescription, background }),
@@ -190,6 +190,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onUnlocked }) 
   // null = first check pending (page opened from a Square return / bookmark)
   const [status, setStatus] = useState(fresh ? 'awaiting_payment' : null)
   const [timedOut, setTimedOut] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
   const onUnlockedRef = useRef(onUnlocked)
   onUnlockedRef.current = onUnlocked
 
@@ -199,7 +200,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onUnlocked }) 
       setUnlocking(true)
       let url = checkoutUrl
       if (!url) {
-        const res = await fetch(`${API}/api/cover-letter/create-checkout`, {
+        const res = await fetch(`${API_BASE}/cover-letter/create-checkout`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ publicToken }),
@@ -228,7 +229,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onUnlocked }) 
     async function poll() {
       let next = null
       try {
-        const res = await fetch(`${API}/api/cover-letter/result/${encodeURIComponent(publicToken)}`)
+        const res = await fetch(`${API_BASE}/cover-letter/result/${encodeURIComponent(publicToken)}`)
         const data = await res.json().catch(() => ({}))
         if (cancelled) return
         if (res.status === 404) { setStatus('missing'); return }
@@ -249,7 +250,18 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onUnlocked }) 
 
     poll()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [publicToken, jobTitle])
+  }, [publicToken, jobTitle, retryKey])
+
+  if (status === null && timedOut) {
+    return (
+      <PanelCard className="space-y-3">
+        <ErrorBox message="We couldn't check your order right now. Please check your connection and try again." />
+        <GhostButton type="button" onClick={() => { setTimedOut(false); setRetryKey((k) => k + 1) }}>
+          Try again
+        </GhostButton>
+      </PanelCard>
+    )
+  }
 
   if (status === null) {
     return (
@@ -402,7 +414,7 @@ function CoverLetterResult({ letter, jobTitle, onStartOver }) {
 
 // ---------- Top-level page --------------------------------------------------
 
-export default function CoverLetterPage() {
+export default function CoverLetterPage({ onBack }) {
   const initialToken = new URLSearchParams(window.location.search).get('token')
   const startMode = initialToken?.startsWith('cl_') ? 'paywall' : 'form'
 
@@ -435,11 +447,20 @@ export default function CoverLetterPage() {
     setLetter('')
     setCheckoutUrl('')
     setFresh(false)
-    window.history.pushState({}, '', '/')
+    window.history.pushState({}, '', '/?page=cover-letter')
   }
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8 space-y-6">
+      {onBack ? (
+        <button
+          onClick={onBack}
+          className="inline-flex items-center gap-2 text-sm text-slate-300 transition hover:text-white"
+        >
+          ← Back to jobs
+        </button>
+      ) : null}
+
       {/* Hero */}
       <PanelCard>
         <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300">

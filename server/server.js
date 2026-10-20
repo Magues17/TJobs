@@ -23,9 +23,9 @@ const app = express()
 
 const PORT = Number(process.env.PORT || 3000)
 const JOB_POST_EXPIRATION_DAYS = 14
+const JWT_SECRET_CONFIGURED = !!process.env.JWT_SECRET && process.env.JWT_SECRET !== 'dev-only-secret-change-this'
 const JWT_SECRET = (() => {
-  const configured = process.env.JWT_SECRET
-  if (configured && configured !== 'dev-only-secret-change-this') return configured
+  if (JWT_SECRET_CONFIGURED) return process.env.JWT_SECRET
   // Never sign with a known secret. A random one keeps the site up but signs
   // everyone out on every restart, so set JWT_SECRET in the environment.
   console.error('WARNING: JWT_SECRET is not set (or is the old default). Using a random secret; all sessions reset on restart. Set JWT_SECRET to fix this.')
@@ -192,7 +192,7 @@ const corsOptions = {
       return
     }
 
-    callback(new Error('Not allowed by CORS'))
+    callback(clientError('Not allowed by CORS'))
   },
   credentials: true,
 }
@@ -206,11 +206,18 @@ const storage = multer.diskStorage({
   },
 })
 
+// An error whose message is safe to show the user; the error handler answers
+// 400 with it. Anything without a 4xx status is answered with generic text.
+function clientError(message) {
+  return Object.assign(new Error(message), { status: 400 })
+}
+
 // Deletes the uploaded resume when the route answers with an error, so every
 // early return (validation, 404, 429, catch blocks) cleans up in one place.
+// A route sets req.keepUpload once a saved row points at the file.
 function discardUploadOnError(req, res, next) {
   res.on('finish', () => {
-    if (req.file?.path && res.statusCode >= 400) {
+    if (req.file?.path && res.statusCode >= 400 && !req.keepUpload) {
       fs.promises.unlink(req.file.path).catch(() => {})
     }
   })
@@ -229,7 +236,7 @@ const resumeCheckerUpload = multer({
     const isPdf = ext === '.pdf' && (mime.includes('pdf') || mime === 'application/octet-stream')
 
     if (!isPdf) {
-      cb(new Error('Only PDF resume files are allowed.'))
+      cb(clientError('Only PDF resume files are allowed.'))
       return
     }
     cb(null, true)
@@ -274,14 +281,20 @@ const consumeInterviewPrepRate = createIpRateLimiter()
 const consumeLoginRate = createIpRateLimiter(15 * 60 * 1000, 10)
 const consumeForgotPasswordRate = createIpRateLimiter(60 * 60 * 1000, 5)
 const consumeResetPasswordRate = createIpRateLimiter(15 * 60 * 1000, 10)
+const consumeJobSeekerUploadRate = createIpRateLimiter(60 * 60 * 1000, 10)
+const consumeApplyUploadRate = createIpRateLimiter(60 * 60 * 1000, 10)
 
 // req.ip honours the 'trust proxy' setting below: it is the address the
 // nearest untrusted hop connected from, so a client cannot pick its own
-// bucket by sending a fake X-Forwarded-For. When the app is reached over a
-// Unix socket (no remote address) the last X-Forwarded-For entry is the one
-// the local proxy added.
+// bucket by sending a fake X-Forwarded-For. If req.ip is missing the socket's
+// peer address is used. Only when there is no peer address at all (a Unix
+// socket, as Passenger uses) is the last X-Forwarded-For entry used: that is
+// the one the local web server appended, never the client-supplied left end.
+// /api/admin/diagnostics shows which case production hits.
 function getRequestIp(req) {
-  return String(req.ip || String(req.headers['x-forwarded-for'] || '').split(',').pop() || '').trim()
+  if (req.ip) return req.ip
+  if (req.socket?.remoteAddress) return req.socket.remoteAddress
+  return String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()
 }
 
 // Express middleware form for routes that only need a per-IP cap.
@@ -306,7 +319,7 @@ const upload = multer({
     const isPdf = ext === '.pdf' && (mime.includes('pdf') || mime === 'application/octet-stream')
 
     if (!isPdf) {
-      cb(new Error('Only PDF resume files are allowed.'))
+      cb(clientError('Only PDF resume files are allowed.'))
       return
     }
 
@@ -1623,10 +1636,18 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;')
 }
 
+// Hashing first gives equal-length buffers, so the compare time does not
+// depend on where (or whether) the strings differ.
+function timingSafeEqualStrings(a, b) {
+  const hashA = crypto.createHash('sha256').update(String(a)).digest()
+  const hashB = crypto.createHash('sha256').update(String(b)).digest()
+  return crypto.timingSafeEqual(hashA, hashB)
+}
+
 async function requireAdminAuth(req, res, next) {
   const providedKey = getAdminKeyFromRequest(req)
 
-  if (ADMIN_API_KEY && providedKey && providedKey === ADMIN_API_KEY) {
+  if (ADMIN_API_KEY && providedKey && timingSafeEqualStrings(providedKey, ADMIN_API_KEY)) {
     req.admin = {
       authenticated: true,
       is_admin: true,
@@ -1971,12 +1992,14 @@ app.get('/api/health', async (req, res) => {
     console.error('GET /api/health error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Health check failed.',
+      error: 'Health check failed.',
     })
   }
 })
 
-app.post('/api/jobseekers', discardUploadOnError, upload.single('resume_file'), async (req, res) => {
+// The limiter runs after multer so a 429 still drains the body; the upload it
+// rejected is then deleted by discardUploadOnError.
+app.post('/api/jobseekers', discardUploadOnError, upload.single('resume_file'), rateLimitByIp(consumeJobSeekerUploadRate, 'Too many submissions. Please try again later.'), async (req, res) => {
   try {
     const fullName = safeTrim(req.body.full_name, 255)
     const email = normalizeEmail(req.body.email)
@@ -2042,7 +2065,7 @@ app.post('/api/jobseekers', discardUploadOnError, upload.single('resume_file'), 
     console.error('POST /api/jobseekers error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to submit resume.',
+      error: 'Failed to submit resume.',
     })
   }
 })
@@ -2095,12 +2118,12 @@ app.get('/api/jobposts/:id', async (req, res) => {
     console.error('GET /api/jobposts/:id error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch job posting.',
+      error: 'Failed to fetch job posting.',
     })
   }
 })
 
-app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_file'), async (req, res) => {
+app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_file'), rateLimitByIp(consumeApplyUploadRate, 'Too many applications. Please try again later.'), async (req, res) => {
   try {
     await expireOpenJobs()
     const jobId = Number(req.params.id)
@@ -2216,6 +2239,8 @@ app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_
         ats.title_match ? 1 : 0,
       ]
     )
+    // The saved application points at the PDF now; keep it even if a later step fails.
+    req.keepUpload = true
 
     await pool.query(
       `
@@ -2245,7 +2270,7 @@ app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_
     console.error('POST /api/jobposts/:id/apply error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to submit application.',
+      error: 'Failed to submit application.',
     })
   }
 })
@@ -2356,7 +2381,7 @@ app.post('/api/employer-plan/start-checkout', async (req, res) => {
     console.error('POST /api/employer-plan/start-checkout error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to start secure employer checkout.',
+      error: 'Failed to start secure employer checkout.',
     })
   }
 })
@@ -2392,7 +2417,7 @@ app.get('/api/employer-plan/checkout-status', async (req, res) => {
     console.error('GET /api/employer-plan/checkout-status error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to retrieve checkout status.',
+      error: 'Failed to retrieve checkout status.',
     })
   }
 })
@@ -2589,6 +2614,13 @@ async function createSquareResumeCheckerCheckoutLink({ publicToken, email }) {
   }
 }
 
+// Matches the note createSquareResumeCheckerCheckoutLink sets
+// ("TarboroJobs resume check ref:rc_...") or a bare rc_ token.
+function extractResumeCheckRef(value) {
+  const match = String(value || '').match(/(?:^|\bref:)(rc_[a-zA-Z0-9_-]+)/)
+  return match?.[1] || null
+}
+
 async function tryHandleResumeCheckerPayment({ payment, eventId, merchantId }) {
   if (!payment) return false
 
@@ -2597,8 +2629,8 @@ async function tryHandleResumeCheckerPayment({ payment, eventId, merchantId }) {
     row = await findResumeCheckByOrderId(payment.order_id)
   }
   if (!row) {
-    const ref = extractCheckoutRef(payment.note) || extractCheckoutRef(payment.reference_id)
-    if (ref && ref.startsWith('rc_')) {
+    const ref = extractResumeCheckRef(payment.note) || extractResumeCheckRef(payment.reference_id)
+    if (ref) {
       row = await findResumeCheckByToken(ref)
     }
   }
@@ -2613,7 +2645,7 @@ async function tryHandleResumeCheckerPayment({ payment, eventId, merchantId }) {
     SET
       square_payment_id = COALESCE(?, square_payment_id),
       square_order_id = COALESCE(?, square_order_id),
-      payment_status = ?,
+      payment_status = CASE WHEN payment_status = 'paid' THEN 'paid' ELSE ? END,
       paid_at = CASE WHEN ? = 'completed' THEN COALESCE(paid_at, CURRENT_TIMESTAMP) ELSE paid_at END
     WHERE id = ?
     `,
@@ -2768,7 +2800,7 @@ app.post(
       }
       return res.status(500).json({
         success: false,
-        error: error?.message || 'Failed to analyze resume.',
+        error: 'Failed to analyze resume.',
       })
     }
   }
@@ -2820,6 +2852,12 @@ app.post('/api/resume-checker/create-checkout', async (req, res) => {
       })
     }
 
+    // One Square link per check: clicking Unlock again reuses it, so the
+    // order id the webhook matches on never moves away from a paid link.
+    if (row.square_checkout_url) {
+      return res.json({ success: true, checkoutUrl: row.square_checkout_url })
+    }
+
     const { paymentLinkId, checkoutUrl, orderId } = await createSquareResumeCheckerCheckoutLink({
       publicToken,
       email: row.email || undefined,
@@ -2829,9 +2867,9 @@ app.post('/api/resume-checker/create-checkout', async (req, res) => {
       `
       UPDATE resume_checks
       SET
-        payment_status = 'pending',
+        payment_status = CASE WHEN payment_status = 'paid' THEN 'paid' ELSE 'pending' END,
         square_payment_link_id = ?,
-        square_order_id = ?,
+        square_order_id = COALESCE(?, square_order_id),
         square_checkout_url = ?
       WHERE id = ?
       `,
@@ -2846,7 +2884,7 @@ app.post('/api/resume-checker/create-checkout', async (req, res) => {
     console.error('POST /api/resume-checker/create-checkout error:', error)
     return res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to create checkout.',
+      error: 'Failed to create checkout.',
     })
   }
 })
@@ -2893,7 +2931,7 @@ app.get('/api/resume-checker/report/:publicToken', async (req, res) => {
     console.error('GET /api/resume-checker/report error:', error)
     return res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to load resume report.',
+      error: 'Failed to load resume report.',
     })
   }
 })
@@ -3040,7 +3078,7 @@ app.post('/api/employer-onboarding-token', requireAdminAuth, async (req, res) =>
     console.error('POST /api/employer-onboarding-token error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to create onboarding token.',
+      error: 'Failed to create onboarding token.',
     })
   } finally {
     connection.release()
@@ -3141,7 +3179,7 @@ app.get('/api/employer-onboarding/validate', async (req, res) => {
     console.error('GET /api/employer-onboarding/validate error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to validate onboarding token.',
+      error: 'Failed to validate onboarding token.',
     })
   }
 })
@@ -3203,8 +3241,10 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
         t.id,
         t.status,
         t.expires_at,
-        t.employer_id
+        t.employer_id,
+        e.access_status
       FROM employer_onboarding_tokens t
+      LEFT JOIN employers e ON e.id = t.employer_id
       WHERE t.token = ?
       LIMIT 1
       `,
@@ -3256,6 +3296,34 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'This token is not linked to an employer record.',
+      })
+    }
+
+    if (tokenRow.access_status === 'inactive') {
+      await connection.rollback()
+      return res.status(403).json({
+        success: false,
+        error: 'This employer account has been deactivated. Please contact TarboroJobs.',
+      })
+    }
+
+    // Claim the token before doing anything else. The row lock this takes is
+    // held until commit, so a second submit of the same token waits here and
+    // then matches 0 rows instead of onboarding twice.
+    const [consumed] = await connection.query(
+      `
+      UPDATE employer_onboarding_tokens
+      SET status = 'used', used_at = NOW()
+      WHERE id = ? AND status = 'pending'
+      `,
+      [tokenRow.id]
+    )
+
+    if (consumed.affectedRows !== 1) {
+      await connection.rollback()
+      return res.status(403).json({
+        success: false,
+        error: 'This onboarding token has already been used.',
       })
     }
 
@@ -3362,17 +3430,8 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
       employerUserId = insertUser.insertId
     }
 
-    await connection.query(
-      `
-      UPDATE employer_onboarding_tokens
-      SET
-        status = CASE WHEN id = ? THEN 'used' ELSE 'revoked' END,
-        used_at = CASE WHEN id = ? THEN NOW() ELSE used_at END
-      WHERE employer_id = ?
-        AND status = 'pending'
-      `,
-      [tokenRow.id, tokenRow.id, employerId]
-    )
+    // This token is already 'used'; retire any other pending links.
+    await revokePendingTokensForEmployer(connection, employerId)
 
     await connection.commit()
 
@@ -3395,12 +3454,15 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
     console.error('POST /api/employer-onboarding/complete error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to complete employer onboarding.',
+      error: 'Failed to complete employer onboarding.',
     })
   } finally {
     connection.release()
   }
 })
+
+// Compared against when the email is unknown; same cost (10) as real hashes.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 10)
 
 app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many login attempts. Please try again later.'), async (req, res) => {
   try {
@@ -3437,14 +3499,18 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
       [email]
     )
 
-    if (!rows.length) {
+    // Unknown email, wrong password and a disabled account all look the same
+    // until the password is proven: same 401, and a bcrypt compare either way
+    // so the response time does not give the account away.
+    const user = rows[0]
+    const passwordMatches = await bcrypt.compare(password, user?.password_hash || DUMMY_PASSWORD_HASH)
+
+    if (!user || !passwordMatches) {
       return res.status(401).json({
         success: false,
         error: 'Invalid email or password.',
       })
     }
-
-    const user = rows[0]
 
     if (!user.is_active) {
       return res.status(403).json({
@@ -3466,15 +3532,6 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
       return res.status(403).json({
         success: false,
         error: 'This employer account is not eligible for login.',
-      })
-    }
-
-    const passwordMatches = await bcrypt.compare(password, user.password_hash || '')
-
-    if (!passwordMatches) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid email or password.',
       })
     }
 
@@ -3503,23 +3560,25 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
     console.error('POST /api/employer-auth/login error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Internal server error.',
+      error: 'Internal server error.',
     })
   }
 })
 
 app.post('/api/employer-auth/forgot-password', rateLimitByIp(consumeForgotPasswordRate, 'Too many password reset requests. Please try again later.'), async (req, res) => {
+  const email = normalizeEmail(req.body.email)
+
+  // Same reply, sent before any lookup, whether or not the account exists or
+  // the email goes out, so neither the body nor the timing reveals accounts.
+  // Failures are only logged.
+  res.json({
+    success: true,
+    message: 'If that email exists, a password reset link has been sent.',
+  })
+
+  if (!email || !isValidEmail(email)) return
+
   try {
-    const email = normalizeEmail(req.body.email)
-    const genericMessage = 'If that email exists, a password reset link has been sent.'
-
-    if (!email || !isValidEmail(email)) {
-      return res.json({
-        success: true,
-        message: genericMessage,
-      })
-    }
-
     const [rows] = await pool.query(
       `
       SELECT
@@ -3539,21 +3598,8 @@ app.post('/api/employer-auth/forgot-password', rateLimitByIp(consumeForgotPasswo
       [email]
     )
 
-    if (!rows.length) {
-      return res.json({
-        success: true,
-        message: genericMessage,
-      })
-    }
-
     const user = rows[0]
-
-    if (!user.is_active || !user.onboarding_completed || !isEmployerEligible(user)) {
-      return res.json({
-        success: true,
-        message: genericMessage,
-      })
-    }
+    if (!user || !user.is_active || !user.onboarding_completed || !isEmployerEligible(user)) return
 
     await pool.query(
       `
@@ -3589,22 +3635,10 @@ app.post('/api/employer-auth/forgot-password', rateLimitByIp(consumeForgotPasswo
     })
 
     if (!emailSent) {
-      return res.status(503).json({
-        success: false,
-        error: 'Password reset email is not configured on the server yet.',
-      })
+      console.error('POST /api/employer-auth/forgot-password: reset email not sent; mail or APP_BASE_URL is not configured.')
     }
-
-    res.json({
-      success: true,
-      message: genericMessage,
-    })
   } catch (error) {
     console.error('POST /api/employer-auth/forgot-password error:', error)
-    res.status(500).json({
-      success: false,
-      error: error?.message || 'Failed to send password reset email.',
-    })
   }
 })
 
@@ -3680,7 +3714,7 @@ app.get('/api/employer-auth/reset-password/validate', rateLimitByIp(consumeReset
     console.error('GET /api/employer-auth/reset-password/validate error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to validate password reset token.',
+      error: 'Failed to validate password reset token.',
     })
   }
 })
@@ -3811,7 +3845,7 @@ app.post('/api/employer-auth/reset-password', rateLimitByIp(consumeResetPassword
     console.error('POST /api/employer-auth/reset-password error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to reset password.',
+      error: 'Failed to reset password.',
     })
   } finally {
     connection.release()
@@ -3866,7 +3900,19 @@ app.patch('/api/employer/account', requireEmployerAuth, async (req, res) => {
       [email, employerUserId]
     )
 
-    if (emailConflicts.length > 0) {
+    // employers.email also matters: paid checkout looks employers up by it,
+    // so taking another business's address would hijack or block its signup.
+    const [employerEmailConflicts] = await pool.query(
+      `
+      SELECT id
+      FROM employers
+      WHERE email = ? AND id <> ?
+      LIMIT 1
+      `,
+      [email, employerId]
+    )
+
+    if (emailConflicts.length > 0 || employerEmailConflicts.length > 0) {
       return res.status(409).json({
         success: false,
         error: 'That email address is already being used by another employer login.',
@@ -3948,7 +3994,7 @@ app.patch('/api/employer/account', requireEmployerAuth, async (req, res) => {
     console.error('PATCH /api/employer/account error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to update employer account.',
+      error: 'Failed to update employer account.',
     })
   }
 })
@@ -4033,7 +4079,7 @@ app.patch('/api/employer/account/password', requireEmployerAuth, async (req, res
     console.error('PATCH /api/employer/account/password error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to update employer password.',
+      error: 'Failed to update employer password.',
     })
   }
 })
@@ -4085,7 +4131,7 @@ app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asyn
     console.error('GET /api/employer/jobs error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch jobs.',
+      error: 'Failed to fetch jobs.',
     })
   }
 })
@@ -4197,7 +4243,7 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
     console.error('POST /api/employer/jobs error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to create job.',
+      error: 'Failed to create job.',
     })
   }
 })
@@ -4332,7 +4378,7 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
     console.error('PATCH /api/employer/jobs/:id error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to update job.',
+      error: 'Failed to update job.',
     })
   }
 })
@@ -4412,7 +4458,7 @@ app.patch(
       console.error('PATCH /api/employer/jobs/:id/status error:', error)
       res.status(500).json({
         success: false,
-        error: error?.message || 'Failed to update job status.',
+        error: 'Failed to update job status.',
       })
     }
   }
@@ -4462,7 +4508,7 @@ app.delete('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmploye
     console.error('DELETE /api/employer/jobs/:id error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to delete job.',
+      error: 'Failed to delete job.',
     })
   }
 })
@@ -4548,7 +4594,7 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
     console.error('GET /api/employer/stats error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch employer stats.',
+      error: 'Failed to fetch employer stats.',
     })
   }
 })
@@ -4788,7 +4834,7 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
     console.error('GET /api/employer/resumes error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch resumes.',
+      error: 'Failed to fetch resumes.',
     })
   }
 })
@@ -4945,7 +4991,7 @@ app.post(
       console.error('POST /api/employer/candidate-actions error:', error)
       res.status(500).json({
         success: false,
-        error: error?.message || 'Failed to save candidate action.',
+        error: 'Failed to save candidate action.',
       })
     }
   }
@@ -5079,7 +5125,7 @@ app.patch(
       console.error('PATCH /api/employer/candidate-actions/:id error:', error)
       res.status(500).json({
         success: false,
-        error: error?.message || 'Failed to update candidate action.',
+        error: 'Failed to update candidate action.',
       })
     }
   }
@@ -5101,12 +5147,7 @@ app.get('/api/employers', async (req, res) => {
         city,
         notes,
         status,
-        subscription_status,
-        access_status,
-        current_period_end,
-        onboarding_completed,
-        created_at,
-        updated_at
+        created_at
       FROM employers
       WHERE access_status = 'active'
         AND onboarding_completed = 1
@@ -5125,14 +5166,8 @@ app.get('/api/employers', async (req, res) => {
       address: row.address,
       city: row.city,
       description: row.notes,
-      status: row.status,
-      subscription_status: row.subscription_status,
-      access_status: row.access_status,
-      current_period_end: row.current_period_end,
-      onboarding_completed: !!row.onboarding_completed,
       hiring: row.status === 'active',
       created_at: row.created_at,
-      updated_at: row.updated_at,
     }))
 
     res.json({
@@ -5143,7 +5178,7 @@ app.get('/api/employers', async (req, res) => {
     console.error('GET /api/employers error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch employers.',
+      error: 'Failed to fetch employers.',
     })
   }
 })
@@ -5205,7 +5240,7 @@ app.get('/api/jobposts', async (req, res) => {
     console.error('GET /api/jobposts error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch job posts.',
+      error: 'Failed to fetch job posts.',
     })
   }
 })
@@ -5283,7 +5318,7 @@ app.get('/api/admin/session', requireAdminAuth, async (req, res) => {
     console.error('GET /api/admin/session error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to load admin session.',
+      error: 'Failed to load admin session.',
     })
   }
 })
@@ -5391,7 +5426,7 @@ app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
     console.error('GET /api/admin/employers error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch employers.',
+      error: 'Failed to fetch employers.',
     })
   }
 })
@@ -5474,7 +5509,7 @@ app.get('/api/admin/jobs', requireAdminAuth, async (req, res) => {
     console.error('GET /api/admin/jobs error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch jobs.',
+      error: 'Failed to fetch jobs.',
     })
   }
 })
@@ -5528,7 +5563,7 @@ app.get('/api/admin/tokens', requireAdminAuth, async (req, res) => {
     console.error('GET /api/admin/tokens error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to fetch onboarding tokens.',
+      error: 'Failed to fetch onboarding tokens.',
     })
   }
 })
@@ -5567,7 +5602,7 @@ app.post('/api/admin/employers/:id/approve', requireAdminAuth, async (req, res) 
     console.error('POST /api/admin/employers/:id/approve error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to approve employer.',
+      error: 'Failed to approve employer.',
     })
   }
 })
@@ -5599,7 +5634,7 @@ app.delete('/api/admin/jobs/:id', requireAdminAuth, async (req, res) => {
     console.error('DELETE /api/admin/jobs/:id error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to remove job.',
+      error: 'Failed to remove job.',
     })
   }
 })
@@ -5638,6 +5673,9 @@ app.post('/api/admin/employers/:id/deactivate', requireAdminAuth, async (req, re
       [employerId]
     )
 
+    // An unused onboarding link would otherwise set the account active again.
+    await revokePendingTokensForEmployer(connection, employerId)
+
     await connection.commit()
 
     res.json({
@@ -5649,7 +5687,7 @@ app.post('/api/admin/employers/:id/deactivate', requireAdminAuth, async (req, re
     console.error('POST /api/admin/employers/:id/deactivate error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to deactivate employer.',
+      error: 'Failed to deactivate employer.',
     })
   } finally {
     connection.release()
@@ -5684,7 +5722,7 @@ app.post('/api/admin/employers/:id/reactivate', requireAdminAuth, async (req, re
     console.error('POST /api/admin/employers/:id/reactivate error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to reactivate employer.',
+      error: 'Failed to reactivate employer.',
     })
   }
 })
@@ -5717,7 +5755,7 @@ app.post('/api/admin/tokens/:id/revoke', requireAdminAuth, async (req, res) => {
     console.error('POST /api/admin/tokens/:id/revoke error:', error)
     res.status(500).json({
       success: false,
-      error: error?.message || 'Failed to revoke onboarding token.',
+      error: 'Failed to revoke onboarding token.',
     })
   }
 })
@@ -5746,13 +5784,101 @@ async function createSquareQuickPayLink({ name, priceCents, currency, note, redi
 
 // ── Job Scraper ──────────────────────────────────────────────────────────────
 
+// Passenger restarts the app every few hours, so an in-memory 24 h timer never
+// fires. Instead the app checks hourly and scrapes when the DB says the last
+// run is over SCRAPE_MIN_AGE_MS old. The upsert in jobScraper.js sets
+// updated_at = NOW() on every row it sees, so MAX(updated_at) of scraped rows
+// is the last successful scrape. A MySQL named lock keeps two Passenger
+// processes from scraping at once; scrapeRunning covers this process.
+const SCRAPE_SOURCES = ['edgecombe_county', 'tarboro', 'usajobs']
+const SCRAPE_MIN_AGE_MS = 20 * 60 * 60 * 1000
+const SCRAPE_FIRST_CHECK_MS = 2 * 60 * 1000
+const SCRAPE_CHECK_EVERY_MS = 60 * 60 * 1000
+let scrapeRunning = false
+
+async function getLastScrapeAt() {
+  const [rows] = await pool.query(
+    `SELECT MAX(updated_at) AS last_scrape_at FROM job_posts WHERE source IN (?)`,
+    [SCRAPE_SOURCES]
+  )
+  return rows[0]?.last_scrape_at || null
+}
+
+// Returns { busy: true } when a run is already going (here or in another
+// process), { skipped: true } when onlyIfStale and the last run is recent,
+// otherwise the runAllScrapers result.
+async function runScrapeExclusive({ onlyIfStale, trigger }) {
+  if (scrapeRunning) return { busy: true }
+  scrapeRunning = true
+  let connection = null
+  try {
+    connection = await pool.getConnection()
+    const [lockRows] = await connection.query(`SELECT GET_LOCK('tarborojobs_scrape', 0) AS got`)
+    if (Number(lockRows[0]?.got) !== 1) return { busy: true }
+
+    try {
+      if (onlyIfStale) {
+        const lastScrapeAt = await getLastScrapeAt()
+        if (lastScrapeAt && Date.now() - new Date(lastScrapeAt).getTime() < SCRAPE_MIN_AGE_MS) {
+          return { skipped: true, lastScrapeAt }
+        }
+      }
+      console.log(`[scraper] start (${trigger})`)
+      const result = await runAllScrapers(pool)
+      console.log(`[scraper] finished (${trigger}): imported ${result?.imported ?? 0}, updated ${result?.updated ?? 0}, closed ${result?.closed ?? 0}, errors ${result?.errors?.length ?? 0}`)
+      return result
+    } finally {
+      await connection.query(`SELECT RELEASE_LOCK('tarborojobs_scrape')`).catch(() => {})
+    }
+  } finally {
+    connection?.release()
+    scrapeRunning = false
+  }
+}
+
+function scheduleScrapes() {
+  const check = () => runScrapeExclusive({ onlyIfStale: true, trigger: 'schedule' })
+    .catch((error) => console.error('[scraper] scheduled run failed:', error))
+  setTimeout(check, SCRAPE_FIRST_CHECK_MS)
+  setInterval(check, SCRAPE_CHECK_EVERY_MS)
+}
+
+// Deploy check for the client-IP and secret setup. Returns no secret values.
+app.get('/api/admin/diagnostics', requireAdminAuth, async (req, res) => {
+  try {
+    const forwardedHeaders = {}
+    for (const name of ['x-forwarded-for', 'x-real-ip', 'forwarded', 'cf-connecting-ip', 'x-client-ip', 'true-client-ip']) {
+      if (req.headers[name] !== undefined) forwardedHeaders[name] = req.headers[name]
+    }
+    const [adminRows] = await pool.query(`SELECT COUNT(*) AS admin_count FROM employer_users WHERE is_admin = 1`)
+
+    res.json({
+      success: true,
+      ip: req.ip ?? null,
+      socketAddress: req.socket?.remoteAddress ?? null,
+      forwardedHeaders,
+      trustProxy: String(app.get('trust proxy')),
+      rateLimitKey: getRequestIp(req),
+      jwtSecretConfigured: JWT_SECRET_CONFIGURED,
+      adminUserCount: Number(adminRows[0]?.admin_count || 0),
+      lastScrapeAt: await getLastScrapeAt(),
+    })
+  } catch (error) {
+    console.error('GET /api/admin/diagnostics error:', error)
+    res.status(500).json({ success: false, error: 'Failed to load diagnostics.' })
+  }
+})
+
 app.post('/api/admin/scrape-jobs', requireAdminAuth, async (req, res) => {
   try {
-    const result = await runAllScrapers(pool)
+    const result = await runScrapeExclusive({ onlyIfStale: false, trigger: 'admin' })
+    if (result.busy) {
+      return res.status(409).json({ success: false, error: 'A job scrape is already running. Try again in a few minutes.' })
+    }
     res.json({ success: true, ...result })
   } catch (error) {
     console.error('POST /api/admin/scrape-jobs error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Scrape failed.' })
+    res.status(500).json({ success: false, error: 'Scrape failed.' })
   }
 })
 
@@ -6077,7 +6203,7 @@ async function handleAiOrderCreateCheckout(productKey, req, res) {
     res.json({ success: true, checkoutUrl })
   } catch (error) {
     console.error(`[${productKey}] create-checkout error:`, error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to create checkout.' })
+    res.status(500).json({ success: false, error: 'Failed to create checkout.' })
   }
 }
 
@@ -6126,7 +6252,7 @@ async function handleAiOrderResult(productKey, req, res) {
       message: 'Payment received. We are preparing your order now; this takes a few seconds.',
     })
   } catch (error) {
-    res.status(500).json({ success: false, error: error?.message || 'Failed to retrieve result.' })
+    res.status(500).json({ success: false, error: 'Failed to retrieve result.' })
   }
 }
 
@@ -6164,7 +6290,7 @@ app.post('/api/cover-letter/generate', async (req, res) => {
     res.json({ success: true, publicToken, checkoutUrl, priceCents: COVER_LETTER_PRICE_CENTS, currency: 'USD' })
   } catch (error) {
     console.error('POST /api/cover-letter/generate error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to save cover letter request.' })
+    res.status(500).json({ success: false, error: 'Failed to save cover letter request.' })
   }
 })
 
@@ -6201,7 +6327,7 @@ app.post('/api/interview-prep/generate', async (req, res) => {
     res.json({ success: true, publicToken, checkoutUrl, priceCents: INTERVIEW_PREP_PRICE_CENTS, currency: 'USD' })
   } catch (error) {
     console.error('POST /api/interview-prep/generate error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to save interview prep request.' })
+    res.status(500).json({ success: false, error: 'Failed to save interview prep request.' })
   }
 })
 
@@ -6311,7 +6437,7 @@ app.get('/api/admin/ai-orders', requireAdminAuth, async (req, res) => {
     })
   } catch (error) {
     console.error('GET /api/admin/ai-orders error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to load AI product orders.' })
+    res.status(500).json({ success: false, error: 'Failed to load AI product orders.' })
   }
 })
 
@@ -6342,7 +6468,7 @@ app.post('/api/admin/ai-orders/:product/:id/rerun', requireAdminAuth, async (req
     })
   } catch (error) {
     console.error('POST /api/admin/ai-orders/:product/:id/rerun error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to rerun the order.' })
+    res.status(500).json({ success: false, error: 'Failed to rerun the order.' })
   }
 })
 
@@ -6374,9 +6500,19 @@ app.use((error, req, res, next) => {
   }
 
   if (error) {
-    return res.status(400).json({
+    // 4xx errors (clientError, body-parser) carry a message meant for the
+    // user; anything else is internal and only goes to the log.
+    const status = Number(error.status || error.statusCode) || 500
+    if (status >= 400 && status < 500) {
+      return res.status(status).json({
+        success: false,
+        error: error.message || 'Request failed.',
+      })
+    }
+    console.error(`${req.method} ${req.path} unhandled error:`, error)
+    return res.status(500).json({
       success: false,
-      error: error.message || 'Request failed.',
+      error: 'Internal server error.',
     })
   }
 
@@ -6400,8 +6536,7 @@ async function startServer() {
     console.log(`Server running on port ${PORT}`)
   })
 
-  // ponytail: simple interval, replace with proper cron if scheduling precision matters
-  setInterval(() => runAllScrapers(pool).catch(console.error), 24 * 60 * 60 * 1000)
+  scheduleScrapes()
 }
 
 startServer().catch((error) => {

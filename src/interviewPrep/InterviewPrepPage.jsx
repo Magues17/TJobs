@@ -12,7 +12,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Loader2, CheckCircle2, Lock, ChevronDown, ChevronUp, ArrowLeft, Sparkles } from 'lucide-react'
 
-const API = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
+const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
 // ---------- Shared UI primitives (mirror resume checker style) ---------------
 
@@ -51,6 +51,15 @@ function PrimaryButton({ children, className = '', loading, ...props }) {
   )
 }
 
+function ErrorBox({ message }) {
+  if (!message) return null
+  return (
+    <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+      {message}
+    </div>
+  )
+}
+
 // ---------- Form --------------------------------------------------------------
 
 function InterviewPrepForm({ onReady }) {
@@ -68,7 +77,7 @@ function InterviewPrepForm({ onReady }) {
     }
     try {
       setSubmitting(true)
-      const res = await fetch(`${API}/api/interview-prep/generate`, {
+      const res = await fetch(`${API_BASE}/interview-prep/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobTitle: jobTitle.trim(), jobDescription: jobDescription.trim() }),
@@ -143,6 +152,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onPaid }) {
   // null = first check pending (page opened from a Square return / bookmark)
   const [status, setStatus] = useState(fresh ? 'awaiting_payment' : null)
   const [timedOut, setTimedOut] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
   const onPaidRef = useRef(onPaid)
   onPaidRef.current = onPaid
 
@@ -152,7 +162,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onPaid }) {
       setUnlocking(true)
       let url = checkoutUrl
       if (!url) {
-        const res = await fetch(`${API}/api/interview-prep/create-checkout`, {
+        const res = await fetch(`${API_BASE}/interview-prep/create-checkout`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ publicToken }),
@@ -181,7 +191,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onPaid }) {
     async function poll() {
       let next = null
       try {
-        const res = await fetch(`${API}/api/interview-prep/result/${encodeURIComponent(publicToken)}`)
+        const res = await fetch(`${API_BASE}/interview-prep/result/${encodeURIComponent(publicToken)}`)
         const data = await res.json().catch(() => ({}))
         if (cancelled) return
         if (res.status === 404) { setStatus('missing'); return }
@@ -202,7 +212,18 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onPaid }) {
 
     poll()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [publicToken, jobTitle])
+  }, [publicToken, jobTitle, retryKey])
+
+  if (status === null && timedOut) {
+    return (
+      <PanelCard className="space-y-3">
+        <ErrorBox message="We couldn't check your order right now. Please check your connection and try again." />
+        <PrimaryButton type="button" onClick={() => { setTimedOut(false); setRetryKey((k) => k + 1) }}>
+          Try again
+        </PrimaryButton>
+      </PanelCard>
+    )
+  }
 
   if (status === null) {
     return (

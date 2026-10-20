@@ -1,4 +1,6 @@
-import { getStoredEmployerToken } from './auth'
+import { clearStoredEmployerToken, getStoredEmployerToken } from './auth'
+
+export const EMPLOYER_AUTH_EXPIRED_EVENT = 'employer-auth-expired'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -11,12 +13,29 @@ function parseJsonResponse(text) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options)
+  const { skipAuthExpiry, ...fetchOptions } = options
+  const response = await fetch(url, fetchOptions)
   const text = await response.text()
-  const data = parseJsonResponse(text)
+
+  // Expired/revoked employer token: drop it and let App send the user to login.
+  // Login/reset requests carry no Authorization header, so they never trigger this.
+  if (response.status === 401 && !skipAuthExpiry && fetchOptions.headers?.Authorization) {
+    clearStoredEmployerToken()
+    window.dispatchEvent(new Event(EMPLOYER_AUTH_EXPIRED_EVENT))
+  }
+
+  let data
+  try {
+    data = parseJsonResponse(text)
+  } catch (error) {
+    error.status = response.status
+    throw error
+  }
 
   if (!response.ok || !data.success) {
-    throw new Error(data.error || 'Request failed.')
+    const error = new Error(data.error || 'Request failed.')
+    error.status = response.status
+    throw error
   }
 
   return data
@@ -78,6 +97,7 @@ export async function resetEmployerPassword(payload) {
 export async function loadEmployerSession(tokenOverride) {
   return requestJson(`${API_BASE}/employer-auth/me`, {
     headers: buildAuthHeaders(tokenOverride, false),
+    skipAuthExpiry: true, // App decides what to do with a failed session check
   })
 }
 
