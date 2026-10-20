@@ -101,7 +101,7 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
       const paidSince = `COALESCE(paid_at, created_at) >= CURDATE() - INTERVAL ${days - 1} DAY`
       const num = (v) => Number(v) || 0
 
-      const [today, daily, pages, jobs, referrers, campaigns, devices, types, checkouts, resume, cover, prep, employer] = await Promise.all([
+      const [today, daily, pages, jobs, referrers, campaigns, devices, types, checkouts, resume, cover, prep, employer, featured] = await Promise.all([
         q(`SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today`),
         q(`SELECT DATE_FORMAT(created_at, '%Y-%m-%d') AS day, COUNT(DISTINCT visitor_id) AS visitors, SUM(event_type = 'page_view') AS page_views
            FROM analytics_events WHERE ${since} GROUP BY day ORDER BY day`),
@@ -120,6 +120,7 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM cover_letter_requests WHERE payment_status = 'paid' AND ${paidSince}`),
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM interview_prep_requests WHERE payment_status = 'paid' AND ${paidSince}`),
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(amount_cents), 0) AS cents FROM employer_pending_checkouts WHERE payment_status = 'paid' AND ${paidSince}`),
+        q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM featured_orders WHERE status = 'paid' AND ${paidSince}`),
       ])
 
       const byType = Object.fromEntries(types.map((r) => [r.event_type, { events: num(r.events), sessions: num(r.sessions) }]))
@@ -136,6 +137,7 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
         cover_letter: { orders: num(cover[0]?.orders), cents: num(cover[0]?.cents) },
         interview_prep: { orders: num(prep[0]?.orders), cents: num(prep[0]?.cents) },
         employer_plan: { orders: num(employer[0]?.orders), cents: num(employer[0]?.cents) },
+        featured: { orders: num(featured[0]?.orders), cents: num(featured[0]?.cents) },
       }
       const products = PRODUCTS.map((product) => ({
         product,

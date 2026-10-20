@@ -32,6 +32,7 @@ import {
 } from './utils'
 import { clearStoredEmployerToken, getStoredEmployerToken } from './auth'
 import { EMPLOYER_AUTH_EXPIRED_EVENT } from './api'
+import FeatureJobControl from '../featured/FeatureJobControl'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -660,10 +661,12 @@ export default function EmployerDashboardPage({
                               <span>{humanizeStatus(job.status)}</span>
                             </div>
                           </div>
+                          {job.source_url ? null : (
                           <button type="button" onClick={() => beginEditJob(job)} className="inline-flex items-center gap-2 rounded-2xl border border-slate-700 bg-white/5 px-3.5 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600">
                             <PencilLine className="h-3.5 w-3.5" />
                             Edit
                           </button>
+                          )}
                         </div>
                         <div className="mt-3 text-sm leading-6 text-slate-300 line-clamp-3">{job.job_description}</div>
                       </div>
@@ -904,6 +907,10 @@ export default function EmployerDashboardPage({
                         </div>
 
                         <div className="flex flex-wrap gap-2">
+                          <FeatureJobControl job={job} />
+                          {job.source_url ? (
+                            <span className="max-w-xs text-xs leading-5 text-slate-400">Imported nightly from your official site, so its text and status can't be edited here. You can feature it.</span>
+                          ) : (<>
                           <button type="button" onClick={() => beginEditJob(job)} className="inline-flex items-center gap-1.5 rounded-2xl border border-slate-700 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600">
                             <PencilLine className="h-3.5 w-3.5" /> Edit
                           </button>
@@ -916,6 +923,7 @@ export default function EmployerDashboardPage({
                           {job.status !== 'filled' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'filled')} className="inline-flex items-center gap-1.5 rounded-2xl border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-300 transition hover:bg-cyan-500/15"><CheckCircle2 className="h-3.5 w-3.5" /> Filled</button> : null}
                           {job.status !== 'closed' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'closed')} className="inline-flex items-center gap-1.5 rounded-2xl border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 transition hover:bg-rose-500/15"><XCircle className="h-3.5 w-3.5" /> Close</button> : null}
                           {job.status !== 'draft' ? <button type="button" onClick={() => onUpdateJobStatus(job.id, 'draft')} className="inline-flex items-center gap-1.5 rounded-2xl border border-slate-700 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600"><PencilLine className="h-3.5 w-3.5" /> Draft</button> : null}
+                          </>)}
                         </div>
                       </div>
 

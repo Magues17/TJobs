@@ -302,16 +302,14 @@ export function register({
               now.getTime() - MAX_LOOKBACK_MS
             )
           const since = new Date(Math.min(...due.map(windowStart)))
-          // Same visibility rules as GET /api/jobposts.
-          // FEATURED HOOK (later phase): once job_posts.featured_until exists,
-          // select it here and sort rows with featured_until > now to the top
-          // of `matches` below. Do not reference the column before it exists.
+          // Same visibility rules as GET /api/jobposts. featured_until is
+          // added at startup by featured.js; featured matches go first.
           const [jobs] = await pool.query(
             `SELECT jp.id, jp.job_title, jp.job_description, jp.city,
                     COALESCE(jp.industry, e.industry) AS industry,
                     jp.pay_min, jp.pay_max, jp.pay_type, jp.employment_type,
                     COALESCE(jp.published_at, jp.created_at) AS published_at,
-                    e.business_name
+                    jp.featured_until, e.business_name
              FROM job_posts jp
              INNER JOIN employers e ON e.id = jp.employer_id
              WHERE jp.status = 'open'
@@ -326,9 +324,11 @@ export function register({
           for (const subscription of due) {
             if (result.sent + result.failed >= maxPerRun) break
             const start = windowStart(subscription)
-            const matches = jobs.filter(
+            const isFeatured = (job) => !!job.featured_until && new Date(job.featured_until) > now
+            const fresh = jobs.filter(
               (job) => new Date(job.published_at).getTime() > start && jobMatches(subscription, job)
             )
+            const matches = [...fresh.filter(isFeatured), ...fresh.filter((job) => !isFeatured(job))]
             if (!matches.length) continue // nothing new: send nothing, advance nothing
 
             if (result.sent + result.failed > 0) await sleep(sendDelayMs)
