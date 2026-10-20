@@ -3001,7 +3001,16 @@ async function tryHandleResumeCheckerPayment({ payment, eventId, merchantId }) {
   }
   if (!row) return false
 
-  const paymentStatus = String(payment.status || '').toLowerCase()
+  let paymentStatus = String(payment.status || '').toLowerCase()
+  const paidCents = Number(payment.amount_money?.amount || 0)
+  const paidCurrency = String(payment.amount_money?.currency || '').toUpperCase()
+  if (
+    paymentStatus === 'completed' &&
+    (paidCents < RESUME_CHECKER_PRICE_CENTS || paidCurrency !== String(RESUME_CHECKER_PRICE_CURRENCY || 'USD').toUpperCase())
+  ) {
+    console.warn(`[resume-check] payment ${payment.id} for check ${row.id} is ${paidCents} ${paidCurrency}, expected ${RESUME_CHECKER_PRICE_CENTS}; not unlocking`)
+    paymentStatus = 'underpaid'
+  }
   const nextStatus = paymentStatus === 'completed' ? 'paid' : (paymentStatus === 'failed' ? 'failed' : 'pending')
 
   await pool.query(
