@@ -17,6 +17,7 @@ import {
   Sparkles,
   FileText,
   BookOpen,
+  UserRound,
   X,
 } from 'lucide-react'
 import {
@@ -79,6 +80,8 @@ import { track } from './lib/track'
 import JobAlertSignup from './alerts/JobAlertSignup'
 import AlertPage from './alerts/AlertPages'
 import LandingLinks from './LandingLinks'
+import { OneClickApply, SaveJobButton, SeekerJobsPage, SeekerProfilePage, SeekerSignInPage, SeekerVerifyPage } from './seeker/SeekerPages'
+import { useSeeker } from './seeker/session'
 import { findLandingPage, landingJobs } from '../shared/landingPages.js'
 import FeaturedBadge from './featured/FeaturedBadge'
 import ClaimListing from './featured/ClaimListing'
@@ -111,7 +114,8 @@ const coverLetterPages = ['cover-letter', 'cover-letter-result']
 const interviewPrepPages = ['interview-prep', 'interview-prep-result']
 const aiToolPages = [...resumeCheckerPages, ...coverLetterPages, ...interviewPrepPages, 'bundle']
 const alertPages = ['alerts-confirm', 'alerts-unsubscribe']
-const LEGAL_LAST_UPDATED = 'April 18, 2026'
+const seekerPages = ['seeker-login', 'seeker-verify', 'seeker-profile', 'seeker-jobs']
+const LEGAL_LAST_UPDATED = 'October 20, 2026'
 
 const privacyPolicySections = [
   {
@@ -119,6 +123,7 @@ const privacyPolicySections = [
     body: [
       'TarboroJobs may collect information you submit directly to us, including employer account details, business profile details, job posting content, applicant contact details, resume files, resume text, messages, and other information you choose to provide through the site.',
       'We may also collect technical and usage information such as device, browser, IP-address level information, pages visited, referring URLs, and other basic analytics or log data needed to operate, secure, and improve the service.',
+      'If you create a job seeker account, we store your email address (confirmed by the sign-in link we email you), plus whatever you add to your profile: name, phone, town, the job you want, a short summary, and one saved PDF resume. We also keep the jobs you save and use your email address to show the applications you sent through TarboroJobs. There is no password; each sign-in link works once and expires after 15 minutes.',
       'We measure site usage with our own anonymous, first-party statistics: pages viewed, the type of device, where a visit came from, and whether a visitor applied or used a tool. This uses a random ID kept in your browser storage, not cookies, and the statistics do not include your IP address or any personal details. We use no third-party analytics or advertising trackers, and we do not record any statistics if your browser sends a Do Not Track or Global Privacy Control signal.',
     ],
   },
@@ -134,6 +139,7 @@ const privacyPolicySections = [
     heading: '3. How information is shared',
     body: [
       'Applications, resumes, and related applicant information are shared with the employer that owns the job posting the applicant chose to apply for.',
+      'Your job seeker profile and saved resume are private. Employers cannot browse or search them. When you use Apply with your profile, that one employer receives your name, email, phone, town, summary, and a copy of your saved resume, exactly as if you had filled in the application form. Employers you did not apply to never see them.',
       'We may also share information with service providers that help us host, secure, support, or maintain the platform, or when disclosure is reasonably necessary to comply with law, enforce our terms, protect users, investigate misuse, or respond to legal process.',
     ],
   },
@@ -162,6 +168,7 @@ const privacyPolicySections = [
     heading: '7. Your choices',
     body: [
       'You may choose not to provide certain information, but parts of the service may not work properly if required information is missing.',
+      'Job seekers can edit their profile or replace their resume at any time, and can delete their account from the profile page. Deleting removes the profile, the saved resume, and saved jobs right away. Applications you already sent are kept by the employers you sent them to; contact that employer to remove one. Job alert emails are separate and stop with the unsubscribe link in any alert.',
       'If you want to request updates to business account information or have privacy questions about information you submitted through TarboroJobs, contact us using the contact details listed below.',
     ],
   },
@@ -359,6 +366,7 @@ function getInitialRoute() {
   if (page === 'employer-payment-success') return { page: 'employer-payment-success', jobId: null }
   if (aiToolPages.includes(page)) return { page, jobId: null }
   if (alertPages.includes(page)) return { page, jobId: null }
+  if (seekerPages.includes(page)) return { page, jobId: null }
   if (legalPages.includes(page) || adminPages.includes(page)) return { page, jobId: null }
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
@@ -375,7 +383,7 @@ function buildPublicPath(page, jobId = null) {
   if (page === 'job-apply' && jobId) return `/jobs/${jobId}/apply`
   if (legalPages.includes(page) || adminPages.includes(page)) return `/?page=${page}`
   if (page === 'employer-payment-success') return '/?page=employer-payment-success'
-  if (aiToolPages.includes(page)) return `/?page=${page}`
+  if (aiToolPages.includes(page) || seekerPages.includes(page)) return `/?page=${page}`
   if (findLandingPage(page)) return `/${page}`
   return '/'
 }
@@ -389,6 +397,7 @@ function formatPostedDate(value) {
 
 function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onLogout, children }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const seeker = useSeeker()
 
   const navItems = [
     { key: 'jobs', label: 'Jobs', icon: Briefcase },
@@ -396,6 +405,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onL
     { key: 'resume-checker', label: 'Resume Check', icon: Sparkles },
     { key: 'cover-letter', label: 'Cover Letter', icon: FileText },
     { key: 'interview-prep', label: 'Interview Prep', icon: BookOpen },
+    { key: seeker.token ? 'seeker-jobs' : 'seeker-login', label: 'Job seekers', icon: UserRound },
     { key: 'list-business', label: 'For Employers', icon: Landmark },
     employerSession
       ? {
@@ -901,16 +911,19 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
 
               <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
                 <div className="text-xs text-slate-500">Open the job page to review the full posting and apply.</div>
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onViewJob(job.id)
-                  }}
-                  className="rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
-                >
-                  View job
-                </button>
+                <div className="flex items-center gap-2">
+                  <SaveJobButton jobId={job.id} />
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onViewJob(job.id)
+                    }}
+                    className="rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+                  >
+                    View job
+                  </button>
+                </div>
               </div>
             </article>
           ))}
@@ -956,7 +969,7 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-4">
+      <div className="mb-4 flex items-center justify-between gap-3">
         <button
           type="button"
           onClick={onBack}
@@ -964,6 +977,7 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
         >
           Back to jobs
         </button>
+        <SaveJobButton jobId={job.id} />
       </div>
 
       <SectionHeader
@@ -1390,6 +1404,8 @@ function SubmitResumePage({ job, loading, error, onBack }) {
         title={`Apply for ${job.title}`}
         subtitle={`${job.company} • ${job.city || 'Tarboro area'}`}
       />
+
+      <OneClickApply job={job} />
 
       <div className="mb-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
         <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
@@ -1929,7 +1945,7 @@ export default function TarboroJobsHomepage() {
   const [candidateActionError, setCandidateActionError] = useState('')
 
   function setBrowserLocation(page, jobId = null, options = {}) {
-    if (!['jobs', 'job-detail', 'job-apply', 'employer-payment-success', ...legalPages, ...adminPages, ...aiToolPages].includes(page) && !findLandingPage(page)) return
+    if (!['jobs', 'job-detail', 'job-apply', 'employer-payment-success', ...legalPages, ...adminPages, ...aiToolPages, ...seekerPages].includes(page) && !findLandingPage(page)) return
 
     const nextPath = buildPublicPath(page, jobId)
     const currentPath = `${window.location.pathname}${window.location.search}`
@@ -1950,7 +1966,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (page === 'job-detail' || page === 'job-apply' || page === 'employer-payment-success' || legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page) || findLandingPage(page)) {
+    if (page === 'job-detail' || page === 'job-apply' || page === 'employer-payment-success' || legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page) || seekerPages.includes(page) || findLandingPage(page)) {
       setBrowserLocation(page, jobId, options)
     }
   }
@@ -1961,7 +1977,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page)) {
+    if (legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page) || seekerPages.includes(page)) {
       navigateToPage(page, null)
       return
     }
@@ -2758,6 +2774,10 @@ export default function TarboroJobsHomepage() {
       )}
       {currentPage === 'bundle' && <BundlePage />}
       {alertPages.includes(currentPage) && <AlertPage page={currentPage} />}
+      {currentPage === 'seeker-login' && <SeekerSignInPage />}
+      {currentPage === 'seeker-verify' && <SeekerVerifyPage />}
+      {currentPage === 'seeker-profile' && <SeekerProfilePage jobs={jobs} />}
+      {currentPage === 'seeker-jobs' && <SeekerJobsPage />}
       {currentPage === 'list-business' && <ListBusinessPage />}
       {currentPage === 'employer-login' && (
         <EmployerLoginPage

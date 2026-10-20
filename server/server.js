@@ -17,6 +17,7 @@ import { registerAnalytics } from './analytics.js'
 import { registerBundles } from './bundles.js'
 import { register as registerJobAlerts } from './alerts.js'
 import { register as registerFacebook } from './facebook.js'
+import { register as registerSeekers } from './seekers.js'
 import { createSeo } from './seo.js'
 import { register as registerFeatured, orderFeaturedFirst, isFeatured } from './featured.js'
 
@@ -208,9 +209,14 @@ const storage = multer.diskStorage({
   // Unguessable name, nothing from the uploader. Both upload filters only
   // accept .pdf, so the extension is fixed.
   filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${crypto.randomBytes(16).toString('hex')}.pdf`)
+    cb(null, newResumeFileName())
   },
 })
+
+// Also used for the copy of a saved profile resume sent with a one-click apply.
+function newResumeFileName() {
+  return `${Date.now()}-${crypto.randomBytes(16).toString('hex')}.pdf`
+}
 
 // An error whose message is safe to show the user; the error handler answers
 // 400 with it. Anything without a 4xx status is answered with generic text.
@@ -1919,7 +1925,7 @@ async function requireAdminAuth(req, res, next) {
 
   if (token) {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET)
+      const decoded = verifyEmployerJwt(token)
       const session = await loadEmployerSessionByUserId(decoded.user_id)
 
       // Admin rights come from the stored flag, never from the (editable) email.
@@ -1950,6 +1956,17 @@ async function requireAdminAuth(req, res, next) {
     success: false,
     error: 'Unauthorized admin request.',
   })
+}
+
+// Employer (and admin) tokens carry no audience or type. Job seeker tokens are
+// signed with the same secret but always have both (see seekers.js), so they
+// are refused here even if someone gets one minted with employer-looking claims.
+function verifyEmployerJwt(token) {
+  const decoded = jwt.verify(token, JWT_SECRET)
+  if (decoded.aud !== undefined || decoded.typ !== undefined) {
+    throw new Error('Not an employer token.')
+  }
+  return decoded
 }
 
 function tokenVersionMatches(decoded, session) {
@@ -2021,7 +2038,7 @@ async function requireEmployerAuth(req, res, next) {
       })
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET)
+    const decoded = verifyEmployerJwt(token)
     const session = await loadEmployerSessionByUserId(decoded.user_id)
 
     if (!session || !tokenVersionMatches(decoded, session)) {
@@ -2457,84 +2474,17 @@ app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_
       })
     }
 
-    const pdfResumeText = await extractPdfTextFromFile(req.file.path)
-    const combinedResumeText = safeTrim(
-      [applicantNote, pdfResumeText].filter(Boolean).join('\n\n'),
-      50000
-    )
-    const ats = buildAtsAssessment(job, {
-      desired_job_title: desiredJobTitle,
-      employment_type: employmentType,
-      skills,
-      resume_text: applicantNote,
-      resume_pdf_text: pdfResumeText,
-    })
-    const resumeFileUrl = `/uploads/resumes/${req.file.filename}`
-
-    const [result] = await pool.query(
-      `
-      INSERT INTO job_seekers
-      (
-        full_name,
-        email,
-        phone,
-        city,
-        desired_job_title,
-        employment_type,
-        skills,
-        resume_text,
-        resume_file_url,
-        employer_id,
-        job_post_id,
-        ats_score,
-        ats_recommendation,
-        ats_summary,
-        ats_keywords_matched,
-        ats_keywords_missing,
-        ats_title_match
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      [
-        fullName,
-        email,
-        phone,
-        city,
-        desiredJobTitle,
-        employmentType,
-        skills,
-        combinedResumeText,
-        resumeFileUrl,
-        job.employer_id,
-        job.id,
-        ats.score,
-        ats.recommendation,
-        ats.summary,
-        ats.matched_keywords.join(', '),
-        ats.missing_keywords.join(', '),
-        ats.title_match ? 1 : 0,
-      ]
-    )
-    // The saved application points at the PDF now; keep it even if a later step fails.
-    req.keepUpload = true
-
-    await pool.query(
-      `
-      INSERT INTO employer_candidate_actions
-      (
-        employer_id,
-        job_seeker_id,
-        status,
-        notes
-      )
-      VALUES (?, ?, ?, ?)
-      `,
-      [job.employer_id, result.insertId, 'new', null]
+    const { id, resumeFileUrl, ats } = await createJobApplication(
+      job,
+      { fullName, email, phone, city, desiredJobTitle, employmentType, skills, applicantNote },
+      { path: req.file.path, filename: req.file.filename },
+      // The saved application points at the PDF now; keep it even if a later step fails.
+      () => { req.keepUpload = true }
     )
 
     res.json({
       success: true,
-      id: result.insertId,
+      id,
       resume_file_url: resumeFileUrl,
       ats: {
         score: ats.score,
@@ -2550,6 +2500,90 @@ app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_
     })
   }
 })
+
+// One application to an employer-posted job: the job_seekers row the employer
+// dashboard lists plus its 'new' candidate action. The guest apply form and
+// job seeker one-click apply (seekers.js) both create applications here, so
+// employers see them the same way. onSaved runs as soon as the row points at
+// the PDF, before anything that could still fail.
+async function createJobApplication(job, applicant, resumeFile, onSaved = () => {}) {
+  const { fullName, email, phone, city, desiredJobTitle, employmentType, skills, applicantNote } = applicant
+  const pdfResumeText = await extractPdfTextFromFile(resumeFile.path)
+  const combinedResumeText = safeTrim(
+    [applicantNote, pdfResumeText].filter(Boolean).join('\n\n'),
+    50000
+  )
+  const ats = buildAtsAssessment(job, {
+    desired_job_title: desiredJobTitle,
+    employment_type: employmentType,
+    skills,
+    resume_text: applicantNote,
+    resume_pdf_text: pdfResumeText,
+  })
+  const resumeFileUrl = `/uploads/resumes/${resumeFile.filename}`
+
+  const [result] = await pool.query(
+    `
+    INSERT INTO job_seekers
+    (
+      full_name,
+      email,
+      phone,
+      city,
+      desired_job_title,
+      employment_type,
+      skills,
+      resume_text,
+      resume_file_url,
+      employer_id,
+      job_post_id,
+      ats_score,
+      ats_recommendation,
+      ats_summary,
+      ats_keywords_matched,
+      ats_keywords_missing,
+      ats_title_match
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      fullName,
+      email,
+      phone,
+      city,
+      desiredJobTitle,
+      employmentType,
+      skills,
+      combinedResumeText,
+      resumeFileUrl,
+      job.employer_id,
+      job.id,
+      ats.score,
+      ats.recommendation,
+      ats.summary,
+      ats.matched_keywords.join(', '),
+      ats.missing_keywords.join(', '),
+      ats.title_match ? 1 : 0,
+    ]
+  )
+  onSaved()
+
+  await pool.query(
+    `
+    INSERT INTO employer_candidate_actions
+    (
+      employer_id,
+      job_seeker_id,
+      status,
+      notes
+    )
+    VALUES (?, ?, ?, ?)
+    `,
+    [job.employer_id, result.insertId, 'new', null]
+  )
+
+  return { id: result.insertId, resumeFileUrl, ats }
+}
 
 app.post('/api/employer-plan/start-checkout', async (req, res) => {
   try {
@@ -4959,7 +4993,8 @@ async function sendResumeFile(req, res, employerId) {
       'X-Content-Type-Options': 'nosniff',
       'Cache-Control': 'private, no-store',
     })
-    res.sendFile(filePath, (error) => {
+    // root keeps send's dotfile check to the file name, not the folders above it.
+    res.sendFile(path.basename(filePath), { root: resumesDir }, (error) => {
       if (error && !res.headersSent) notFound()
     })
   } catch (error) {
@@ -6959,6 +6994,27 @@ const featured = registerFeatured({
   APP_BASE_URL,
 })
 
+// Job seeker accounts: magic-link sign-in, profile, one-click apply, saved jobs.
+const seekers = registerSeekers({
+  app,
+  pool,
+  jwtSecret: JWT_SECRET,
+  getMailer,
+  getMailFrom,
+  createIpRateLimiter,
+  getRequestIp,
+  escapeHtml,
+  upload,
+  discardUploadOnError,
+  resumesDir,
+  newResumeFileName,
+  expireOpenJobs,
+  findPublicJobPostById,
+  createJobApplication,
+  normalizeCandidateStatus,
+  APP_BASE_URL,
+})
+
 if (fs.existsSync(frontendIndexFile)) {
   // HTML pages get a per-route <head> (title, canonical, JSON-LD); see seo.js.
   const seo = createSeo({
@@ -7029,6 +7085,7 @@ async function startServer() {
   await bundles.ensureTables().catch((error) => console.error('STARTUP: bundle tables setup failed:', error?.message || error))
   await jobAlerts.ensureTables().catch((error) => console.error('STARTUP: job alert tables setup failed:', error?.message || error))
   await facebook.ensureTable().catch((error) => console.error('STARTUP: facebook table setup failed:', error?.message || error))
+  await seekers.ensureTables().catch((error) => console.error('STARTUP: job seeker tables setup failed:', error?.message || error))
   await expireOpenJobs()
 
   app.listen(PORT, () => {
