@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Ban,
   Briefcase,
@@ -9,9 +9,19 @@ import {
   Mail,
   RefreshCw,
   Shield,
+  Sparkles,
   Trash2,
   UserCheck,
 } from 'lucide-react'
+import { getStoredAdminApiKey } from './auth'
+import { getStoredEmployerToken } from '../employer/auth'
+
+const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
+
+const AI_PRODUCT_LABELS = {
+  cover_letter: 'Cover letter',
+  interview_prep: 'Interview prep',
+}
 
 function formatDateTime(value) {
   if (!value) return '—'
@@ -41,6 +51,33 @@ function toMoneyRange(job) {
   }
 
   return 'Pay not listed'
+}
+
+function formatCents(value) {
+  const cents = Number(value) || 0
+  return `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`
+}
+
+// AI cost per order is a fraction of a cent, so small amounts keep 4 decimals.
+function formatAiCost(value) {
+  const cents = Number(value) || 0
+  return `$${(cents / 100).toFixed(cents < 100 ? 4 : 2)}`
+}
+
+function buildAdminRequestHeaders() {
+  const apiKey = getStoredAdminApiKey()
+  if (apiKey) return { 'x-admin-key': apiKey }
+  const employerToken = getStoredEmployerToken()
+  return employerToken ? { Authorization: `Bearer ${employerToken}` } : {}
+}
+
+async function requestAdminJson(path, options = {}) {
+  const response = await fetch(`${API_BASE}${path}`, { ...options, headers: buildAdminRequestHeaders() })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || 'Request failed.')
+  }
+  return data
 }
 
 function StatusBadge({ children, tone = 'slate' }) {
@@ -75,6 +112,158 @@ function ActionButton({ children, tone = 'default', ...props }) {
     >
       {children}
     </button>
+  )
+}
+
+function AiMetric({ label, value }) {
+  return (
+    <div>
+      <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">{label}</div>
+      <div className="mt-1 text-xl font-semibold tracking-tight text-white">{value}</div>
+    </div>
+  )
+}
+
+// Paid AI products: sales vs estimated Anthropic cost vs profit, plus the
+// latest orders. Loads its own data from /api/admin/ai-orders.
+function AiProductsPanel({ Card, refreshKey }) {
+  const [summary, setSummary] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [rerunningKey, setRerunningKey] = useState('')
+
+  const loadSummary = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setSummary(await requestAdminJson('/admin/ai-orders'))
+    } catch (err) {
+      setError(err?.message || 'Could not load AI product orders.')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadSummary()
+  }, [loadSummary, refreshKey])
+
+  async function handleRerun(order) {
+    const key = `${order.product}:${order.id}`
+    setRerunningKey(key)
+    setError('')
+    setNotice('')
+
+    try {
+      const result = await requestAdminJson(`/admin/ai-orders/${order.product}/${order.id}/rerun`, { method: 'POST' })
+      setNotice(result.message || 'Order rerun.')
+      await loadSummary()
+    } catch (err) {
+      setError(err?.message || 'Could not rerun the order.')
+    } finally {
+      setRerunningKey('')
+    }
+  }
+
+  const periods = [
+    { label: 'This month', totals: summary?.this_month },
+    { label: 'All time', totals: summary?.all_time },
+  ]
+  const orders = summary?.recent_orders || []
+  const failedOrders = Number(summary?.all_time?.failed_orders || 0)
+
+  return (
+    <Card title="AI products">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <p className="max-w-3xl text-sm text-slate-400">
+          Cover letters and interview prep packs. Anthropic is only called after an order is paid. AI cost is estimated
+          from published Anthropic rates (the Anthropic Console bill is the source of truth) and profit is before Square fees.
+        </p>
+        <ActionButton type="button" onClick={loadSummary} disabled={loading}>
+          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          Reload
+        </ActionButton>
+      </div>
+
+      {error ? (
+        <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div>
+      ) : null}
+
+      {notice ? (
+        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{notice}</div>
+      ) : null}
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {periods.map(({ label, totals }) => (
+          <div key={label} className="rounded-3xl border border-slate-800 bg-slate-950/55 p-4">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              <Sparkles className="h-4 w-4 text-cyan-300" />
+              {label}
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <AiMetric label="Paid orders" value={totals ? totals.paid_orders : '—'} />
+              <AiMetric label="Sales" value={totals ? formatCents(totals.sales_cents) : '—'} />
+              <AiMetric label="AI cost" value={totals ? formatAiCost(totals.ai_cost_cents) : '—'} />
+              <AiMetric label="Profit" value={totals ? formatCents(totals.profit_cents) : '—'} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {failedOrders > 0 ? (
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          {failedOrders} paid {failedOrders === 1 ? 'order' : 'orders'} could not be generated. Rerun below, or refund the customer in Square.
+        </div>
+      ) : null}
+
+      <div className="space-y-3">
+        {orders.map((order) => {
+          const key = `${order.product}:${order.id}`
+          const paid = order.payment_status === 'paid'
+          const aiTone = order.ai_status === 'ready' ? 'emerald' : order.ai_status === 'failed' ? 'rose' : 'amber'
+
+          return (
+            <div key={key} className="rounded-3xl border border-slate-800 bg-slate-950/55 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="text-base font-semibold text-white">
+                      {AI_PRODUCT_LABELS[order.product] || order.product} · {order.job_title || 'Untitled role'}
+                    </div>
+                    <StatusBadge tone={paid ? 'emerald' : 'slate'}>{paid ? 'paid' : order.payment_status || 'pending'}</StatusBadge>
+                    {paid ? <StatusBadge tone={aiTone}>{order.ai_status || 'pending'}</StatusBadge> : null}
+                  </div>
+                  <div className="grid gap-2 text-sm text-slate-400 md:grid-cols-2 xl:grid-cols-4">
+                    <div>Price: {formatCents(order.price_cents)}</div>
+                    <div>AI cost: {formatAiCost(order.ai_cost_cents)}</div>
+                    <div>Tokens: {order.ai_input_tokens} in / {order.ai_output_tokens} out</div>
+                    <div>Profit: {paid ? formatCents(order.price_cents - order.ai_cost_cents) : '—'}</div>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Order #{order.id} · Created {formatDateTime(order.created_at)} · Paid {formatDateTime(order.paid_at)}
+                  </div>
+                  {order.ai_error ? <div className="text-xs text-rose-300">Last error: {order.ai_error}</div> : null}
+                </div>
+
+                {paid && order.ai_status === 'failed' ? (
+                  <ActionButton type="button" tone="amber" disabled={!!rerunningKey} onClick={() => handleRerun(order)}>
+                    <RefreshCw className={`h-4 w-4 ${rerunningKey === key ? 'animate-spin' : ''}`} />
+                    {rerunningKey === key ? 'Rerunning…' : 'Rerun'}
+                  </ActionButton>
+                ) : null}
+              </div>
+            </div>
+          )
+        })}
+
+        {summary && !orders.length ? (
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/55 px-4 py-5 text-sm text-slate-400">
+            No AI product orders yet.
+          </div>
+        ) : null}
+      </div>
+    </Card>
   )
 }
 
@@ -113,6 +302,7 @@ export default function AdminDashboardPage({
     send_email: true,
   })
   const [inviteSubmitting, setInviteSubmitting] = useState(false)
+  const [aiRefreshKey, setAiRefreshKey] = useState(0)
 
   const employerResults = useMemo(() => {
     const search = employerSearch.trim().toLowerCase()
@@ -187,6 +377,11 @@ export default function AdminDashboardPage({
     }
   }
 
+  function handleRefresh() {
+    onRefresh()
+    setAiRefreshKey((value) => value + 1)
+  }
+
   const statItems = [
     { label: 'Employers', value: adminOverview.total_employers || 0, note: `${adminOverview.active_employers || 0} active / ${adminOverview.pending_employers || 0} pending` },
     { label: 'Jobs', value: adminOverview.total_jobs || 0, note: `${adminOverview.open_jobs || 0} open / ${adminOverview.closed_jobs || 0} closed` },
@@ -201,7 +396,7 @@ export default function AdminDashboardPage({
         subtitle="Manage employer onboarding, activate or disable accounts, review posted jobs, and moderate the platform without touching raw endpoints."
         action={
           <div className="flex flex-col gap-3 sm:flex-row">
-            <ActionButton onClick={onRefresh} disabled={loading || actionLoading}>
+            <ActionButton onClick={handleRefresh} disabled={loading || actionLoading}>
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
               Refresh
             </ActionButton>
@@ -234,6 +429,8 @@ export default function AdminDashboardPage({
           </div>
         ))}
       </div>
+
+      <AiProductsPanel Card={Card} refreshKey={aiRefreshKey} />
 
       <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
         <Card title="Create employer onboarding link">

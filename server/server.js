@@ -215,24 +215,44 @@ const resumeCheckerUpload = multer({
   },
 })
 
-// Simple in-memory rate limiter for the resume checker upload endpoint.
+// Simple in-memory per-IP rate limiter. Each endpoint gets its own buckets
+// from createIpRateLimiter: the resume checker upload, and the cover letter
+// and interview prep generate endpoints.
 // Not distributed - good enough for a single-instance MVP behind Hostinger.
-const resumeCheckerRateBuckets = new Map()
 const RESUME_CHECKER_RATE_WINDOW_MS = 10 * 60 * 1000 // 10 minutes
-const RESUME_CHECKER_RATE_MAX = 8 // 8 uploads per IP per window
+const RESUME_CHECKER_RATE_MAX = 8 // 8 requests per IP per window
 
-function consumeResumeCheckerRate(ip) {
-  if (!ip) return true
-  const now = Date.now()
-  const bucket = resumeCheckerRateBuckets.get(ip) || []
-  const fresh = bucket.filter((stamp) => now - stamp < RESUME_CHECKER_RATE_WINDOW_MS)
-  if (fresh.length >= RESUME_CHECKER_RATE_MAX) {
-    resumeCheckerRateBuckets.set(ip, fresh)
-    return false
+function createIpRateLimiter(windowMs = RESUME_CHECKER_RATE_WINDOW_MS, max = RESUME_CHECKER_RATE_MAX) {
+  const buckets = new Map()
+
+  return function consume(ip) {
+    if (!ip) return true
+    const now = Date.now()
+    const bucket = buckets.get(ip) || []
+    const fresh = bucket.filter((stamp) => now - stamp < windowMs)
+    if (fresh.length >= max) {
+      buckets.set(ip, fresh)
+      return false
+    }
+    fresh.push(now)
+    buckets.set(ip, fresh)
+
+    // Drop idle IPs so the map cannot grow without bound.
+    if (buckets.size > 5000) {
+      for (const [key, stamps] of buckets) {
+        if (!stamps.length || now - stamps[stamps.length - 1] >= windowMs) buckets.delete(key)
+      }
+    }
+    return true
   }
-  fresh.push(now)
-  resumeCheckerRateBuckets.set(ip, fresh)
-  return true
+}
+
+const consumeResumeCheckerRate = createIpRateLimiter()
+const consumeCoverLetterRate = createIpRateLimiter()
+const consumeInterviewPrepRate = createIpRateLimiter()
+
+function getRequestIp(req) {
+  return String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()
 }
 
 const upload = multer({
@@ -1386,6 +1406,47 @@ async function ensureJobScraperColumns() {
   } catch {}
 }
 
+async function tableColumnExists(tableName, columnName) {
+  const [rows] = await pool.query(
+    `
+    SELECT 1
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = COALESCE(NULLIF(?, ''), DATABASE())
+      AND TABLE_NAME = ?
+      AND COLUMN_NAME = ?
+    LIMIT 1
+    `,
+    [DB_NAME, tableName, columnName]
+  )
+
+  return rows.length > 0
+}
+
+// Payment, generation and AI cost columns shared by the paid AI product
+// tables (cover_letter_requests, interview_prep_requests).
+const AI_ORDER_COLUMNS = [
+  { name: 'square_checkout_url', sql: 'ADD COLUMN square_checkout_url TEXT NULL' },
+  { name: 'square_payment_id', sql: 'ADD COLUMN square_payment_id VARCHAR(255) NULL DEFAULT NULL' },
+  { name: 'paid_at', sql: 'ADD COLUMN paid_at DATETIME NULL DEFAULT NULL' },
+  { name: 'ai_status', sql: 'ADD COLUMN ai_status VARCHAR(32) NULL DEFAULT NULL' },
+  { name: 'ai_attempts', sql: 'ADD COLUMN ai_attempts INT NOT NULL DEFAULT 0' },
+  { name: 'ai_error', sql: 'ADD COLUMN ai_error TEXT NULL' },
+  { name: 'ai_started_at', sql: 'ADD COLUMN ai_started_at DATETIME NULL DEFAULT NULL' },
+  { name: 'ai_completed_at', sql: 'ADD COLUMN ai_completed_at DATETIME NULL DEFAULT NULL' },
+  { name: 'ai_input_tokens', sql: 'ADD COLUMN ai_input_tokens INT NOT NULL DEFAULT 0' },
+  { name: 'ai_output_tokens', sql: 'ADD COLUMN ai_output_tokens INT NOT NULL DEFAULT 0' },
+  { name: 'ai_cost_cents', sql: 'ADD COLUMN ai_cost_cents DECIMAL(10,4) NOT NULL DEFAULT 0' },
+]
+
+async function ensureAiOrderColumns(tableName) {
+  for (const column of AI_ORDER_COLUMNS) {
+    const exists = await tableColumnExists(tableName, column.name)
+    if (!exists) {
+      await pool.query(`ALTER TABLE ${tableName} ${column.sql}`)
+    }
+  }
+}
+
 async function ensureCoverLetterTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS cover_letter_requests (
@@ -1402,6 +1463,7 @@ async function ensureCoverLetterTable() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `)
+  await ensureAiOrderColumns('cover_letter_requests')
 }
 
 async function ensureInterviewPrepTable() {
@@ -1418,6 +1480,7 @@ async function ensureInterviewPrepTable() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `)
+  await ensureAiOrderColumns('interview_prep_requests')
 }
 
 async function ensureEmployerPendingCheckoutsTable() {
@@ -2292,27 +2355,11 @@ app.post('/api/square/webhook', async (req, res) => {
       return res.status(200).json({ success: true, type: 'resume_check' })
     }
 
-    // Cover letter and interview prep webhook routing
-    const paymentNote = safeTrim(payment.note, 500)
-    if (paymentNote && paymentNote.startsWith('cover_letter:')) {
-      const clToken = paymentNote.slice('cover_letter:'.length).trim()
-      if (clToken) {
-        const paymentStatus = String(payment.status || '').toLowerCase()
-        if (paymentStatus === 'completed') {
-          await pool.query(`UPDATE cover_letter_requests SET payment_status='paid' WHERE public_token=?`, [clToken])
-        }
-        return res.status(200).json({ success: true, type: 'cover_letter' })
-      }
-    }
-    if (paymentNote && paymentNote.startsWith('interview_prep:')) {
-      const ipToken = paymentNote.slice('interview_prep:'.length).trim()
-      if (ipToken) {
-        const paymentStatus = String(payment.status || '').toLowerCase()
-        if (paymentStatus === 'completed') {
-          await pool.query(`UPDATE interview_prep_requests SET payment_status='paid' WHERE public_token=?`, [ipToken])
-        }
-        return res.status(200).json({ success: true, type: 'interview_prep' })
-      }
+    // Cover letter and interview prep webhook routing. A completed payment
+    // for the full price marks the order paid and starts the AI generation.
+    const aiProductType = await tryHandleAiProductPayment(payment)
+    if (aiProductType) {
+      return res.status(200).json({ success: true, type: aiProductType })
     }
 
     let checkout = null
@@ -5538,7 +5585,7 @@ async function createSquareQuickPayLink({ name, priceCents, currency, note, redi
   const response = await squareApiRequest('/v2/online-checkout/payment-links', { method: 'POST', body: payload })
   const url = response?.payment_link?.url
   if (!url) throw new Error('Square did not return a checkout URL.')
-  return url
+  return { checkoutUrl: url, orderId: response?.payment_link?.order_id || null }
 }
 
 // ── Job Scraper ──────────────────────────────────────────────────────────────
@@ -5553,131 +5600,584 @@ app.post('/api/admin/scrape-jobs', requireAdminAuth, async (req, res) => {
   }
 })
 
-// ── Cover Letter ──────────────────────────────────────────────────────────────
+// ── Paid AI products (cover letter, interview prep) ────────────────────────────
+// Anthropic is only called after an order is paid. The generate endpoints save
+// the customer's inputs and create the Square checkout; the Square webhook (or
+// the local dev bypass) marks the order paid and starts the generation in the
+// background, retrying once. The result endpoints report 'preparing' until the
+// content is saved.
 
 const COVER_LETTER_PRICE_CENTS = 499
+const INTERVIEW_PREP_PRICE_CENTS = 499
+const AI_ORDER_MAX_ATTEMPTS = 2 // first try + one retry
+// A 'generating' claim older than this is treated as lost (for example a
+// restart mid-call) and may be claimed again.
+const AI_ORDER_STALE_MINUTES = 10
+
+const AI_PRODUCTS = {
+  cover_letter: {
+    table: 'cover_letter_requests',
+    contentColumn: 'letter_text',
+    notePrefix: 'cover_letter:',
+    name: 'Cover Letter',
+    priceCents: COVER_LETTER_PRICE_CENTS,
+    resultPage: 'cover-letter-result',
+    async generate(row) {
+      const { letterText, usage } = await generateCoverLetter({
+        jobTitle: row.job_title,
+        jobDescription: row.job_description || '',
+        userName: row.user_name,
+        userBackground: row.user_background,
+      })
+      return { content: letterText, usage }
+    },
+    present(content) {
+      return { letter: content, letterText: content }
+    },
+  },
+  interview_prep: {
+    table: 'interview_prep_requests',
+    contentColumn: 'questions_json',
+    notePrefix: 'interview_prep:',
+    name: 'Interview Prep Pack',
+    priceCents: INTERVIEW_PREP_PRICE_CENTS,
+    resultPage: 'interview-prep-result',
+    async generate(row) {
+      const { questions, usage } = await generateInterviewPrep({
+        jobTitle: row.job_title,
+        jobDescription: row.job_description || '',
+      })
+      return { content: JSON.stringify(questions), usage }
+    },
+    present(content) {
+      try {
+        return { questions: JSON.parse(content) }
+      } catch {
+        return { questions: [] }
+      }
+    },
+  },
+}
+
+function getAiProduct(productKey) {
+  return Object.prototype.hasOwnProperty.call(AI_PRODUCTS, productKey) ? AI_PRODUCTS[productKey] : null
+}
+
+function roundCents(value) {
+  return Math.round((Number(value) || 0) * 10000) / 10000
+}
+
+function buildAiResultUrl(product, publicToken) {
+  const base = String(APP_BASE_URL || '').replace(/\/+$/, '')
+  return `${base}/?page=${product.resultPage}&token=${encodeURIComponent(publicToken)}`
+}
+
+// Rows made by the old flow already have their content, so paying for them
+// needs no AI call. New rows go to 'pending' and wait for the generation.
+function aiStatusWhenPaidSql(product) {
+  return `CASE
+        WHEN ${product.contentColumn} IS NOT NULL AND ${product.contentColumn} <> '' THEN COALESCE(ai_status, 'ready')
+        ELSE COALESCE(ai_status, 'pending')
+      END`
+}
+
+async function findAiOrderByToken(product, publicToken) {
+  if (!publicToken) return null
+  const [rows] = await pool.query(`SELECT * FROM ${product.table} WHERE public_token = ? LIMIT 1`, [publicToken])
+  return rows[0] || null
+}
+
+// Creates the Square link once per order and reuses it afterwards, so the
+// generate and create-checkout calls never open two payments for one order.
+async function ensureAiOrderCheckout(product, row) {
+  if (row.square_checkout_url) return row.square_checkout_url
+
+  const { checkoutUrl, orderId } = await createSquareQuickPayLink({
+    name: product.name,
+    priceCents: Number(row.price_cents) || product.priceCents,
+    currency: 'USD',
+    note: `${product.notePrefix}${row.public_token}`,
+    redirectUrl: buildAiResultUrl(product, row.public_token),
+  })
+
+  await pool.query(
+    `UPDATE ${product.table} SET square_checkout_url = ?, square_order_id = COALESCE(?, square_order_id) WHERE id = ?`,
+    [checkoutUrl, orderId, row.id]
+  )
+  return checkoutUrl
+}
+
+// The generate endpoints create the checkout up front. Under the dev bypass,
+// or when Square fails, they return checkoutUrl null and the page's
+// create-checkout call handles it (and reports any Square error).
+async function createAiOrderCheckoutSafely(product, row) {
+  if (RESUME_CHECKER_DEV_BYPASS) return null
+  try {
+    return await ensureAiOrderCheckout(product, row)
+  } catch (error) {
+    console.error(`[ai-order] checkout for ${row.public_token} failed:`, error?.message || error)
+    return null
+  }
+}
+
+// Atomically moves a paid order that has no content yet to 'generating'. Only
+// one caller wins, so the webhook, result polling and an admin rerun never
+// generate the same order twice at once.
+async function claimAiOrder(product, orderId, { allowFailed = false } = {}) {
+  const [result] = await pool.query(
+    `
+    UPDATE ${product.table}
+    SET ai_status = 'generating', ai_started_at = CURRENT_TIMESTAMP, ai_error = NULL
+    WHERE id = ?
+      AND payment_status = 'paid'
+      AND (${product.contentColumn} IS NULL OR ${product.contentColumn} = '')
+      AND (
+        ai_status IS NULL
+        OR ai_status = 'pending'
+        ${allowFailed ? "OR ai_status = 'failed'" : ''}
+        OR (ai_status = 'generating' AND ai_started_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ${AI_ORDER_STALE_MINUTES} MINUTE))
+      )
+    `,
+    [orderId]
+  )
+
+  return result.affectedRows === 1
+}
+
+// Generates the content for a paid order, retrying once. Token usage and the
+// estimated cost of every attempt are added to the row. A final failure is
+// saved as ai_status='failed' with the error, so the order can be rerun from
+// the admin dashboard or refunded in Square.
+async function runAiOrder(productKey, orderId, options = {}) {
+  const product = getAiProduct(productKey)
+  if (!product || !orderId) return 'skipped'
+  if (!(await claimAiOrder(product, orderId, options))) return 'skipped'
+
+  const [rows] = await pool.query(`SELECT * FROM ${product.table} WHERE id = ? LIMIT 1`, [orderId])
+  const row = rows[0]
+  if (!row || row.payment_status !== 'paid') return 'skipped'
+
+  const spent = { inputTokens: 0, outputTokens: 0, costCents: 0 }
+  const addUsage = (usage) => {
+    if (!usage) return
+    spent.inputTokens += Number(usage.inputTokens) || 0
+    spent.outputTokens += Number(usage.outputTokens) || 0
+    spent.costCents += Number(usage.costCents) || 0
+  }
+
+  let generated = null
+  let lastError = null
+  let attempts = 0
+  while (!generated && attempts < AI_ORDER_MAX_ATTEMPTS) {
+    attempts += 1
+    try {
+      generated = await product.generate(row)
+      addUsage(generated.usage)
+    } catch (error) {
+      addUsage(error?.usage)
+      lastError = error
+      console.error(`[ai-order] ${productKey} #${orderId} attempt ${attempts} failed:`, error?.message || error)
+    }
+  }
+
+  const usageParams = [attempts, spent.inputTokens, spent.outputTokens, roundCents(spent.costCents)]
+
+  if (generated) {
+    await pool.query(
+      `
+      UPDATE ${product.table}
+      SET
+        ${product.contentColumn} = ?,
+        ai_status = 'ready',
+        ai_error = NULL,
+        ai_completed_at = CURRENT_TIMESTAMP,
+        ai_attempts = ai_attempts + ?,
+        ai_input_tokens = ai_input_tokens + ?,
+        ai_output_tokens = ai_output_tokens + ?,
+        ai_cost_cents = ai_cost_cents + ?
+      WHERE id = ?
+      `,
+      [generated.content, ...usageParams, orderId]
+    )
+    console.log(
+      `[ai-order] ${productKey} #${orderId} ready: ${spent.inputTokens} in / ${spent.outputTokens} out tokens, about ${roundCents(spent.costCents)} cents`
+    )
+    return 'ready'
+  }
+
+  await pool.query(
+    `
+    UPDATE ${product.table}
+    SET
+      ai_status = 'failed',
+      ai_error = ?,
+      ai_completed_at = CURRENT_TIMESTAMP,
+      ai_attempts = ai_attempts + ?,
+      ai_input_tokens = ai_input_tokens + ?,
+      ai_output_tokens = ai_output_tokens + ?,
+      ai_cost_cents = ai_cost_cents + ?
+    WHERE id = ?
+    `,
+    [safeTrim(lastError?.message || 'AI generation failed.', 2000), ...usageParams, orderId]
+  )
+  return 'failed'
+}
+
+function startAiOrder(productKey, orderId, options) {
+  runAiOrder(productKey, orderId, options).catch((error) => {
+    console.error(`[ai-order] ${productKey} #${orderId} could not run:`, error)
+  })
+}
+
+// Called by the Square webhook with a payment fetched from the Square API.
+// Returns the product type when the payment note belongs to an AI order.
+// The order is only marked paid when Square says the payment is completed
+// and the amount covers the order price in USD.
+async function tryHandleAiProductPayment(payment) {
+  const note = safeTrim(payment?.note, 500)
+  const productKey = Object.keys(AI_PRODUCTS).find((key) => note.startsWith(AI_PRODUCTS[key].notePrefix))
+  if (!productKey) return null
+
+  const product = AI_PRODUCTS[productKey]
+  const publicToken = note.slice(product.notePrefix.length).trim()
+  if (!publicToken) return null
+
+  const row = await findAiOrderByToken(product, publicToken)
+  if (!row) return productKey
+
+  const paymentStatus = String(payment.status || '').toLowerCase()
+  if (paymentStatus !== 'completed') return productKey
+
+  const paidCents = Number(payment.amount_money?.amount) || 0
+  const paidCurrency = String(payment.amount_money?.currency || '').toUpperCase()
+  const priceCents = Number(row.price_cents) || product.priceCents
+  if (paidCents < priceCents || paidCurrency !== 'USD') {
+    console.error(
+      `[ai-order] ${productKey} ${publicToken}: payment ${payment.id} of ${paidCents} ${paidCurrency} does not cover ${priceCents} USD; not marking paid`
+    )
+    return productKey
+  }
+
+  await pool.query(
+    `
+    UPDATE ${product.table}
+    SET
+      payment_status = 'paid',
+      paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+      square_payment_id = COALESCE(square_payment_id, ?),
+      square_order_id = COALESCE(square_order_id, ?),
+      ai_status = ${aiStatusWhenPaidSql(product)}
+    WHERE id = ?
+    `,
+    [payment.id || null, payment.order_id || null, row.id]
+  )
+
+  startAiOrder(productKey, row.id)
+  return productKey
+}
+
+async function handleAiOrderCreateCheckout(productKey, req, res) {
+  const product = getAiProduct(productKey)
+  try {
+    const publicToken = safeTrim(req.body?.publicToken, 64)
+    const row = await findAiOrderByToken(product, publicToken)
+    if (!row) return res.status(404).json({ success: false, error: 'Request not found.' })
+
+    const resultUrl = buildAiResultUrl(product, publicToken)
+    if (row.payment_status === 'paid') {
+      return res.json({ success: true, alreadyPaid: true, checkoutUrl: resultUrl })
+    }
+
+    // LOCAL TESTING ONLY (see RESUME_CHECKER_DEV_BYPASS): mark the order paid
+    // without Square and start the generation exactly as the webhook would.
+    if (RESUME_CHECKER_DEV_BYPASS) {
+      await pool.query(
+        `
+        UPDATE ${product.table}
+        SET
+          payment_status = 'paid',
+          paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+          square_payment_id = COALESCE(square_payment_id, 'dev-bypass'),
+          ai_status = ${aiStatusWhenPaidSql(product)}
+        WHERE id = ?
+        `,
+        [row.id]
+      )
+      console.warn(`[${productKey}] DEV BYPASS - marked ${publicToken} as paid without Square`)
+      startAiOrder(productKey, row.id)
+      return res.json({ success: true, devBypass: true, checkoutUrl: resultUrl })
+    }
+
+    const checkoutUrl = await ensureAiOrderCheckout(product, row)
+    res.json({ success: true, checkoutUrl })
+  } catch (error) {
+    console.error(`[${productKey}] create-checkout error:`, error)
+    res.status(500).json({ success: false, error: error?.message || 'Failed to create checkout.' })
+  }
+}
+
+async function handleAiOrderResult(productKey, req, res) {
+  const product = getAiProduct(productKey)
+  try {
+    const row = await findAiOrderByToken(product, safeTrim(req.params.token, 64))
+    if (!row) return res.status(404).json({ success: false, error: 'Not found.' })
+
+    const summary = {
+      success: true,
+      jobTitle: row.job_title,
+      priceCents: row.price_cents,
+      currency: 'USD',
+      paymentStatus: row.payment_status,
+    }
+
+    if (row.payment_status !== 'paid') {
+      return res.json({ ...summary, paid: false, status: 'awaiting_payment' })
+    }
+
+    const content = row[product.contentColumn]
+    if (content) {
+      return res.json({ ...summary, paid: true, status: 'ready', ...product.present(content) })
+    }
+
+    // Paid but not ready yet. `paid` stays false until the content exists so
+    // the pages keep polling instead of showing an empty result; `status` and
+    // `paymentStatus` say what is happening.
+    if (row.ai_status === 'failed') {
+      return res.json({
+        ...summary,
+        paid: false,
+        status: 'failed',
+        message: 'Your payment went through, but we could not prepare your order. We will rerun it or refund you.',
+      })
+    }
+
+    // Restarts the generation if the webhook's run was lost. The claim is
+    // atomic, so a run already in progress is left alone.
+    startAiOrder(productKey, row.id)
+    return res.json({
+      ...summary,
+      paid: false,
+      status: 'preparing',
+      message: 'Payment received. We are preparing your order now; this takes a few seconds.',
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, error: error?.message || 'Failed to retrieve result.' })
+  }
+}
+
+// ── Cover Letter ──────────────────────────────────────────────────────────────
 
 app.post('/api/cover-letter/generate', async (req, res) => {
   try {
-    const { jobTitle, jobDescription, userName, userBackground } = req.body || {}
-    if (!jobTitle || !userName || !userBackground) {
-      return res.status(400).json({ success: false, error: 'jobTitle, userName, and userBackground are required.' })
+    if (!consumeCoverLetterRate(getRequestIp(req))) {
+      return res.status(429).json({ success: false, error: 'Too many requests in a short window. Please try again later.' })
     }
+
+    const body = req.body || {}
+    const jobTitle = safeTrim(body.jobTitle, 255)
+    const jobDescription = safeTrim(body.jobDescription, 8000)
+    // The page sends fullName/background; userName/userBackground are kept for older clients.
+    const userName = safeTrim(body.userName || body.fullName, 255)
+    const userBackground = safeTrim(body.userBackground || body.background, 8000)
+    if (!jobTitle || !userName || !userBackground) {
+      return res.status(400).json({ success: false, error: 'Full name, job title, and background are required.' })
+    }
+
+    // No AI call here: the letter is written after the payment is confirmed.
     const publicToken = `cl_${crypto.randomBytes(18).toString('base64url')}`
-    const letterText = await generateCoverLetter({ jobTitle, jobDescription: jobDescription || '', userName, userBackground })
-    await pool.query(
-      `INSERT INTO cover_letter_requests (public_token, job_title, job_description, user_name, user_background, letter_text, price_cents)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [publicToken, jobTitle, jobDescription || '', userName, userBackground, letterText, COVER_LETTER_PRICE_CENTS]
+    const [result] = await pool.query(
+      `INSERT INTO cover_letter_requests (public_token, job_title, job_description, user_name, user_background, price_cents, ai_status)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+      [publicToken, jobTitle, jobDescription, userName, userBackground, COVER_LETTER_PRICE_CENTS]
     )
-    res.json({ success: true, publicToken, priceCents: COVER_LETTER_PRICE_CENTS, currency: 'USD' })
+
+    const checkoutUrl = await createAiOrderCheckoutSafely(AI_PRODUCTS.cover_letter, {
+      id: result.insertId,
+      public_token: publicToken,
+      price_cents: COVER_LETTER_PRICE_CENTS,
+    })
+    res.json({ success: true, publicToken, checkoutUrl, priceCents: COVER_LETTER_PRICE_CENTS, currency: 'USD' })
   } catch (error) {
     console.error('POST /api/cover-letter/generate error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to generate cover letter.' })
+    res.status(500).json({ success: false, error: error?.message || 'Failed to save cover letter request.' })
   }
 })
 
-app.post('/api/cover-letter/create-checkout', async (req, res) => {
-  try {
-    const { publicToken } = req.body || {}
-    const [rows] = await pool.query('SELECT * FROM cover_letter_requests WHERE public_token = ?', [publicToken])
-    if (!rows.length) return res.status(404).json({ success: false, error: 'Request not found.' })
-    const row = rows[0]
-    if (row.payment_status === 'paid') return res.json({ success: true, alreadyPaid: true })
+app.post('/api/cover-letter/create-checkout', (req, res) => handleAiOrderCreateCheckout('cover_letter', req, res))
 
-    if (process.env.RESUME_CHECKER_DEV_BYPASS === '1') {
-      await pool.query(`UPDATE cover_letter_requests SET payment_status='paid' WHERE public_token=?`, [publicToken])
-      return res.json({ success: true, checkoutUrl: `${APP_BASE_URL}/?page=cover-letter-result&token=${publicToken}` })
-    }
-
-    const checkoutUrl = await createSquareQuickPayLink({
-      name: 'Cover Letter',
-      priceCents: COVER_LETTER_PRICE_CENTS,
-      currency: 'USD',
-      note: `cover_letter:${publicToken}`,
-      redirectUrl: `${APP_BASE_URL}/?page=cover-letter-result&token=${publicToken}`,
-    })
-    res.json({ success: true, checkoutUrl })
-  } catch (error) {
-    console.error('POST /api/cover-letter/create-checkout error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to create checkout.' })
-  }
-})
-
-app.get('/api/cover-letter/result/:token', async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM cover_letter_requests WHERE public_token = ?', [req.params.token])
-    if (!rows.length) return res.status(404).json({ success: false, error: 'Not found.' })
-    const row = rows[0]
-    if (row.payment_status !== 'paid') {
-      return res.json({ success: true, paid: false, priceCents: row.price_cents, currency: 'USD', jobTitle: row.job_title })
-    }
-    res.json({ success: true, paid: true, letterText: row.letter_text, jobTitle: row.job_title })
-  } catch (error) {
-    res.status(500).json({ success: false, error: error?.message || 'Failed to retrieve result.' })
-  }
-})
+app.get('/api/cover-letter/result/:token', (req, res) => handleAiOrderResult('cover_letter', req, res))
 
 // ── Interview Prep ────────────────────────────────────────────────────────────
 
-const INTERVIEW_PREP_PRICE_CENTS = 499
-
 app.post('/api/interview-prep/generate', async (req, res) => {
   try {
-    const { jobTitle, jobDescription } = req.body || {}
+    if (!consumeInterviewPrepRate(getRequestIp(req))) {
+      return res.status(429).json({ success: false, error: 'Too many requests in a short window. Please try again later.' })
+    }
+
+    const body = req.body || {}
+    const jobTitle = safeTrim(body.jobTitle, 255)
+    const jobDescription = safeTrim(body.jobDescription, 8000)
     if (!jobTitle) return res.status(400).json({ success: false, error: 'jobTitle is required.' })
+
+    // No AI call here: the questions are written after the payment is confirmed.
     const publicToken = `ip_${crypto.randomBytes(18).toString('base64url')}`
-    const questions = await generateInterviewPrep({ jobTitle, jobDescription: jobDescription || '' })
-    await pool.query(
-      `INSERT INTO interview_prep_requests (public_token, job_title, job_description, questions_json, price_cents)
-       VALUES (?, ?, ?, ?, ?)`,
-      [publicToken, jobTitle, jobDescription || '', JSON.stringify(questions), INTERVIEW_PREP_PRICE_CENTS]
+    const [result] = await pool.query(
+      `INSERT INTO interview_prep_requests (public_token, job_title, job_description, price_cents, ai_status)
+       VALUES (?, ?, ?, ?, 'pending')`,
+      [publicToken, jobTitle, jobDescription, INTERVIEW_PREP_PRICE_CENTS]
     )
-    res.json({ success: true, publicToken, priceCents: INTERVIEW_PREP_PRICE_CENTS, currency: 'USD' })
+
+    const checkoutUrl = await createAiOrderCheckoutSafely(AI_PRODUCTS.interview_prep, {
+      id: result.insertId,
+      public_token: publicToken,
+      price_cents: INTERVIEW_PREP_PRICE_CENTS,
+    })
+    res.json({ success: true, publicToken, checkoutUrl, priceCents: INTERVIEW_PREP_PRICE_CENTS, currency: 'USD' })
   } catch (error) {
     console.error('POST /api/interview-prep/generate error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to generate interview prep.' })
+    res.status(500).json({ success: false, error: error?.message || 'Failed to save interview prep request.' })
   }
 })
 
-app.post('/api/interview-prep/create-checkout', async (req, res) => {
+app.post('/api/interview-prep/create-checkout', (req, res) => handleAiOrderCreateCheckout('interview_prep', req, res))
+
+app.get('/api/interview-prep/result/:token', (req, res) => handleAiOrderResult('interview_prep', req, res))
+
+// ── Admin: AI product orders ───────────────────────────────────────────────────
+
+const AI_ORDERS_SQL = `
+  SELECT 'cover_letter' AS product, id, job_title, payment_status, ai_status, ai_error, ai_attempts,
+    price_cents, ai_input_tokens, ai_output_tokens, ai_cost_cents, created_at, paid_at
+  FROM cover_letter_requests
+  UNION ALL
+  SELECT 'interview_prep' AS product, id, job_title, payment_status, ai_status, ai_error, ai_attempts,
+    price_cents, ai_input_tokens, ai_output_tokens, ai_cost_cents, created_at, paid_at
+  FROM interview_prep_requests
+`
+
+function buildAiOrderTotals(paidOrders, salesCents, aiCostCents) {
+  const sales = Number(salesCents || 0)
+  const cost = roundCents(aiCostCents)
+  return {
+    paid_orders: Number(paidOrders || 0),
+    sales_cents: sales,
+    ai_cost_cents: cost,
+    profit_cents: roundCents(sales - cost),
+  }
+}
+
+// Sales, estimated AI cost and profit for this month and all time, plus the
+// latest orders. Profit is before Square fees.
+app.get('/api/admin/ai-orders', requireAdminAuth, async (req, res) => {
   try {
-    const { publicToken } = req.body || {}
-    const [rows] = await pool.query('SELECT * FROM interview_prep_requests WHERE public_token = ?', [publicToken])
-    if (!rows.length) return res.status(404).json({ success: false, error: 'Request not found.' })
-    const row = rows[0]
-    if (row.payment_status === 'paid') return res.json({ success: true, alreadyPaid: true })
+    const now = new Date()
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
 
-    if (process.env.RESUME_CHECKER_DEV_BYPASS === '1') {
-      await pool.query(`UPDATE interview_prep_requests SET payment_status='paid' WHERE public_token=?`, [publicToken])
-      return res.json({ success: true, checkoutUrl: `${APP_BASE_URL}/?page=interview-prep-result&token=${publicToken}` })
-    }
+    const [totalsResult, recentResult] = await Promise.all([
+      pool.query(
+        `
+        SELECT
+          product,
+          SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END) AS paid_orders,
+          SUM(CASE WHEN payment_status = 'paid' THEN price_cents ELSE 0 END) AS sales_cents,
+          SUM(ai_cost_cents) AS ai_cost_cents,
+          SUM(CASE WHEN payment_status = 'paid' AND ai_status = 'failed' THEN 1 ELSE 0 END) AS failed_orders,
+          SUM(CASE WHEN payment_status = 'paid' AND COALESCE(paid_at, created_at) >= ? THEN 1 ELSE 0 END) AS month_paid_orders,
+          SUM(CASE WHEN payment_status = 'paid' AND COALESCE(paid_at, created_at) >= ? THEN price_cents ELSE 0 END) AS month_sales_cents,
+          SUM(CASE WHEN COALESCE(paid_at, created_at) >= ? THEN ai_cost_cents ELSE 0 END) AS month_ai_cost_cents
+        FROM (${AI_ORDERS_SQL}) orders
+        GROUP BY product
+        `,
+        [monthStart, monthStart, monthStart]
+      ),
+      pool.query(
+        `
+        SELECT *
+        FROM (${AI_ORDERS_SQL}) orders
+        ORDER BY created_at DESC, id DESC
+        LIMIT 25
+        `
+      ),
+    ])
 
-    const checkoutUrl = await createSquareQuickPayLink({
-      name: 'Interview Prep Pack',
-      priceCents: INTERVIEW_PREP_PRICE_CENTS,
-      currency: 'USD',
-      note: `interview_prep:${publicToken}`,
-      redirectUrl: `${APP_BASE_URL}/?page=interview-prep-result&token=${publicToken}`,
+    const [totalsRows] = totalsResult
+    const [recentRows] = recentResult
+
+    const byProduct = totalsRows.map((row) => ({
+      product: row.product,
+      all_time: buildAiOrderTotals(row.paid_orders, row.sales_cents, row.ai_cost_cents),
+      this_month: buildAiOrderTotals(row.month_paid_orders, row.month_sales_cents, row.month_ai_cost_cents),
+      failed_orders: Number(row.failed_orders || 0),
+    }))
+
+    const sumTotals = (period) =>
+      buildAiOrderTotals(
+        byProduct.reduce((sum, item) => sum + item[period].paid_orders, 0),
+        byProduct.reduce((sum, item) => sum + item[period].sales_cents, 0),
+        byProduct.reduce((sum, item) => sum + item[period].ai_cost_cents, 0)
+      )
+
+    res.json({
+      success: true,
+      month_start: monthStart,
+      cost_note: 'AI cost is estimated from published Anthropic rates; the Anthropic Console bill is the source of truth. Profit is before Square fees.',
+      this_month: sumTotals('this_month'),
+      all_time: {
+        ...sumTotals('all_time'),
+        failed_orders: byProduct.reduce((sum, item) => sum + item.failed_orders, 0),
+      },
+      by_product: byProduct,
+      recent_orders: recentRows.map((row) => ({
+        product: row.product,
+        id: row.id,
+        job_title: row.job_title,
+        payment_status: row.payment_status,
+        ai_status: row.ai_status,
+        ai_error: row.ai_error,
+        ai_attempts: Number(row.ai_attempts || 0),
+        price_cents: Number(row.price_cents || 0),
+        ai_input_tokens: Number(row.ai_input_tokens || 0),
+        ai_output_tokens: Number(row.ai_output_tokens || 0),
+        ai_cost_cents: roundCents(row.ai_cost_cents),
+        created_at: row.created_at,
+        paid_at: row.paid_at,
+      })),
     })
-    res.json({ success: true, checkoutUrl })
   } catch (error) {
-    console.error('POST /api/interview-prep/create-checkout error:', error)
-    res.status(500).json({ success: false, error: error?.message || 'Failed to create checkout.' })
+    console.error('GET /api/admin/ai-orders error:', error)
+    res.status(500).json({ success: false, error: error?.message || 'Failed to load AI product orders.' })
   }
 })
 
-app.get('/api/interview-prep/result/:token', async (req, res) => {
+// Reruns a paid order whose generation failed (or never finished).
+app.post('/api/admin/ai-orders/:product/:id/rerun', requireAdminAuth, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM interview_prep_requests WHERE public_token = ?', [req.params.token])
-    if (!rows.length) return res.status(404).json({ success: false, error: 'Not found.' })
-    const row = rows[0]
-    if (row.payment_status !== 'paid') {
-      return res.json({ success: true, paid: false, priceCents: row.price_cents, currency: 'USD', jobTitle: row.job_title })
+    const productKey = safeTrim(req.params.product, 32)
+    const orderId = Number(req.params.id)
+    if (!getAiProduct(productKey) || !orderId) {
+      return res.status(400).json({ success: false, error: 'A valid product and order ID are required.' })
     }
-    res.json({ success: true, paid: true, questions: JSON.parse(row.questions_json || '[]'), jobTitle: row.job_title })
+
+    const outcome = await runAiOrder(productKey, orderId, { allowFailed: true })
+    if (outcome === 'skipped') {
+      return res.status(409).json({
+        success: false,
+        error: 'This order is unpaid, already has its content, or is being generated right now.',
+      })
+    }
+
+    res.json({
+      success: true,
+      outcome,
+      message:
+        outcome === 'ready'
+          ? 'Order regenerated.'
+          : 'The rerun failed again. Check the error, and refund the customer in Square if needed.',
+    })
   } catch (error) {
-    res.status(500).json({ success: false, error: error?.message || 'Failed to retrieve result.' })
+    console.error('POST /api/admin/ai-orders/:product/:id/rerun error:', error)
+    res.status(500).json({ success: false, error: error?.message || 'Failed to rerun the order.' })
   }
 })
 
