@@ -14,6 +14,7 @@ import { analyzeResume, previewFromFullReport } from './resumeAnalyzer.js'
 import { runAllScrapers } from './jobScraper.js'
 import { generateCoverLetter, generateInterviewPrep } from './aiService.js'
 import { registerAnalytics } from './analytics.js'
+import { register as registerJobAlerts } from './alerts.js'
 
 dotenv.config()
 
@@ -6148,6 +6149,8 @@ function scheduleScrapes() {
     runSubscriptionSyncExclusive({ onlyIfStale: true, trigger: 'schedule' })
       .catch((error) => console.error('[subscriptions] scheduled sync failed:', error)),
     analytics.purgeOldEvents().catch((error) => console.error('[analytics] purge failed:', error?.message || error)),
+    jobAlerts.runDigests({ trigger: 'schedule' })
+      .catch((error) => console.error('[alerts] scheduled digest run failed:', error)),
   ])
   setTimeout(check, SCRAPE_FIRST_CHECK_MS)
   setInterval(check, SCRAPE_CHECK_EVERY_MS)
@@ -6824,6 +6827,21 @@ const analytics = registerAnalytics({
   prices: { resume_check: RESUME_CHECKER_PRICE_CENTS },
 })
 
+// Email job alerts: routes plus the digest the hourly scheduler runs.
+const jobAlerts = registerJobAlerts({
+  app,
+  pool,
+  getMailer,
+  getMailFrom,
+  createIpRateLimiter,
+  getRequestIp,
+  requireAdminAuth,
+  escapeHtml,
+  formatPay: formatPayDisplay,
+  APP_BASE_URL,
+  ipHashSecret: JWT_SECRET,
+})
+
 if (fs.existsSync(frontendIndexFile)) {
   app.use(express.static(frontendDistDir))
 
@@ -6884,6 +6902,7 @@ async function startServer() {
   await ensureCoverLetterTable().catch((error) => console.error('STARTUP: cover letter table setup failed:', error?.message || error))
   await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))
   await analytics.ensureTable().catch((error) => console.error('STARTUP: analytics table setup failed:', error?.message || error))
+  await jobAlerts.ensureTables().catch((error) => console.error('STARTUP: job alert tables setup failed:', error?.message || error))
   await expireOpenJobs()
 
   app.listen(PORT, () => {

@@ -75,6 +75,8 @@ import CandidateActionPanel from './employer/CandidateActionPanel'
 import AdminLoginPage from './admin/AdminLoginPage'
 import AdminDashboardPage from './admin/AdminDashboardPage'
 import { track } from './lib/track'
+import JobAlertSignup from './alerts/JobAlertSignup'
+import AlertPage from './alerts/AlertPages'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -103,6 +105,7 @@ const resumeCheckerPages = ['resume-checker', 'resume-report']
 const coverLetterPages = ['cover-letter', 'cover-letter-result']
 const interviewPrepPages = ['interview-prep', 'interview-prep-result']
 const aiToolPages = [...resumeCheckerPages, ...coverLetterPages, ...interviewPrepPages]
+const alertPages = ['alerts-confirm', 'alerts-unsubscribe']
 const LEGAL_LAST_UPDATED = 'April 18, 2026'
 
 const privacyPolicySections = [
@@ -119,6 +122,7 @@ const privacyPolicySections = [
     body: [
       'We use information to operate TarboroJobs, display business profiles and job listings, process applications, route resumes to the correct employer, communicate with users, maintain account security, prevent abuse, and improve the platform.',
       'Applicant information is used to deliver applications to the employer associated with the specific job posting and to support related workflow features such as candidate review notes, ATS-style matching, and follow-up activity inside the employer dashboard.',
+      'If you sign up for job alert emails, we use your email address and alert choices only to send the alerts you confirmed (plus a one-way hash of your IP address to prevent abuse), and you can stop them at any time with the unsubscribe link in every alert email.',
     ],
   },
   {
@@ -349,6 +353,7 @@ function getInitialRoute() {
   }
   if (page === 'employer-payment-success') return { page: 'employer-payment-success', jobId: null }
   if (aiToolPages.includes(page)) return { page, jobId: null }
+  if (alertPages.includes(page)) return { page, jobId: null }
   if (legalPages.includes(page) || adminPages.includes(page)) return { page, jobId: null }
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
@@ -789,6 +794,12 @@ function JobsPage({ jobs, loading, onViewJob }) {
         showType
       />
 
+      {!loading && (
+        <div className="mb-5">
+          <JobAlertSignup jobs={jobs} keywords={search} />
+        </div>
+      )}
+
       {loading ? (
         <StatStrip
           items={[
@@ -980,6 +991,7 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
               <p className="whitespace-pre-line break-words text-sm leading-7 text-slate-300">{job.description}</p>
             </div>
           </Card>
+          <JobAlertSignup compact town={job.city} category={job.industry} />
         </div>
 
         <div className="space-y-5">
@@ -2705,6 +2717,7 @@ export default function TarboroJobsHomepage() {
       {currentPage === 'interview-prep-result' && (
         <InterviewPrepPage initialMode="paywall" onBack={() => navigateToPage('jobs', null)} />
       )}
+      {alertPages.includes(currentPage) && <AlertPage page={currentPage} />}
       {currentPage === 'list-business' && <ListBusinessPage />}
       {currentPage === 'employer-login' && (
         <EmployerLoginPage
