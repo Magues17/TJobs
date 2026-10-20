@@ -1,6 +1,7 @@
 // server/jobScraper.js
 // Scrapes Edgecombe County, Tarboro, USAJOBS, ECU Health (Tarboro), Edgecombe County
 // Public Schools, ABB (Pinetops) and the Town of Pinetops, and upserts into job_posts.
+import { deepStrictEqual as assertDeepStrictEqual } from 'node:assert'
 
 // Values must come from the site's filter list (src/App.jsx `industries`).
 const INDUSTRY_RULES = [
@@ -84,7 +85,9 @@ function parsePay(text) {
 
 // Run with `node server/jobScraper.js --self-test`.
 if (process.argv[1]?.endsWith('jobScraper.js') && process.argv.includes('--self-test')) {
-  const { deepStrictEqual: eq } = await import('node:assert')
+  // No top-level await anywhere in the server's import graph: Hostinger's
+  // Passenger loads server.js via require(), which rejects async ESM graphs.
+  const eq = assertDeepStrictEqual
   eq(parsePay('Pay: $16.50/hr'), { pay_min: 16.5, pay_max: 16.5, pay_type: 'hourly' })
   eq(parsePay('Salary range $45,000 - $52,000 annually'), { pay_min: 45000, pay_max: 52000, pay_type: 'salary' })
   eq(parsePay('The salary range is $35,100-$52,700 with excellent benefits that total over $11,000 annually'), { pay_min: 35100, pay_max: 52700, pay_type: 'salary' })
