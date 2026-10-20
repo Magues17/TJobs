@@ -29,8 +29,30 @@ import {
   humanizeJobType,
   humanizeStatus,
   humanizePayType,
-  resumeFileHref,
 } from './utils'
+import { getStoredEmployerToken } from './auth'
+
+const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
+
+// Resume PDFs are not public: fetch with the employer's token and hand the
+// browser the file as a blob download.
+async function downloadResumeFile(resumeFileUrl) {
+  const name = String(resumeFileUrl || '').split('/').pop()
+  const token = getStoredEmployerToken()
+  const response = await fetch(`${API_BASE}/employer/resume-files/${encodeURIComponent(name)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!response.ok) throw new Error('Could not load this resume.')
+
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'resume.pdf'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
 
 function getEmptyJobForm(defaultCity = 'Tarboro, NC') {
   return {
@@ -236,7 +258,6 @@ export default function EmployerDashboardPage({
   employerPayTypes,
   employerResumeTypes,
   candidateStatuses,
-  fileBase,
   CandidateActionPanel,
 }) {
   const employer = employerSession?.employer
@@ -1061,14 +1082,13 @@ export default function EmployerDashboardPage({
                           title={selectedResume.full_name}
                           subtitle={selectedResume.desired_job_title || 'Candidate profile'}
                           action={selectedResume.resume_file_url ? (
-                            <a
-                              href={resumeFileHref(fileBase, selectedResume.resume_file_url)}
-                              target="_blank"
-                              rel="noreferrer"
+                            <button
+                              type="button"
+                              onClick={() => downloadResumeFile(selectedResume.resume_file_url).catch((error) => window.alert(error.message))}
                               className="inline-flex items-center justify-center gap-2 rounded-2xl border border-cyan-400/25 bg-cyan-400/10 px-4 py-2.5 text-sm font-medium text-cyan-300 transition hover:bg-cyan-400/15"
                             >
-                              <Download className="h-4 w-4" /> View PDF
-                            </a>
+                              <Download className="h-4 w-4" /> Download PDF
+                            </button>
                           ) : null}
                         />
                         <div className="space-y-5 p-5">

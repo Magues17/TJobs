@@ -2,14 +2,14 @@
 //
 // Flow (paywalled):
 //   1. User fills in job title + optional job description
-//   2. POST /api/interview-prep/generate → { publicToken } → switch to 'paywall'
-//   3. Paywall CTA calls /api/interview-prep/create-checkout → Square redirect
-//   4. On return (token starts with 'ip_'), poll GET /api/interview-prep/result/:token
-//      every 4s. When paid=true, render accordion of questions/answers.
+//   2. POST /api/interview-prep/generate (saves the order, no AI yet) → { publicToken, checkoutUrl }
+//   3. Paywall CTA goes to checkoutUrl (or /create-checkout, which reuses the stored link)
+//   4. Poll GET /api/interview-prep/result/:token (4s, ~5 min): awaiting_payment /
+//      preparing / ready / failed. On ready, render the accordion of questions/answers.
 //
 // All sub-components are local to this file.
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Loader2, CheckCircle2, Lock, ChevronDown, ChevronUp, ArrowLeft, Sparkles } from 'lucide-react'
 
 const API = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
@@ -77,7 +77,7 @@ function InterviewPrepForm({ onReady }) {
       if (!res.ok || !data?.publicToken) {
         throw new Error(data?.error || 'Could not generate your prep pack.')
       }
-      onReady({ publicToken: data.publicToken, jobTitle: jobTitle.trim() })
+      onReady({ publicToken: data.publicToken, jobTitle: jobTitle.trim(), checkoutUrl: data.checkoutUrl || '' })
     } catch (err) {
       setError(err?.message || 'Could not generate your prep pack.')
     } finally {
@@ -134,51 +134,36 @@ function InterviewPrepForm({ onReady }) {
 
 // ---------- Paywall -----------------------------------------------------------
 
-function PaywallCard({ publicToken, jobTitle, onPaid }) {
+const POLL_MS = 4000
+const POLL_MAX = 75 // ~5 minutes
+
+function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onPaid }) {
   const [unlocking, setUnlocking] = useState(false)
   const [error, setError] = useState('')
-
-  // Poll for payment every 4s up to 30 tries
-  useEffect(() => {
-    if (!publicToken) return
-    let cancelled = false
-    let attempts = 0
-
-    async function poll() {
-      try {
-        const res = await fetch(`${API}/api/interview-prep/result/${encodeURIComponent(publicToken)}`)
-        const data = await res.json().catch(() => ({}))
-        if (cancelled) return
-        if (data?.paid) onPaid(data)
-      } catch {
-        // silent — keep polling
-      }
-    }
-
-    poll()
-    const id = setInterval(() => {
-      attempts += 1
-      if (attempts >= 30) { clearInterval(id); return }
-      poll()
-    }, 4000)
-
-    return () => { cancelled = true; clearInterval(id) }
-  }, [publicToken, onPaid])
+  // null = first check pending (page opened from a Square return / bookmark)
+  const [status, setStatus] = useState(fresh ? 'awaiting_payment' : null)
+  const [timedOut, setTimedOut] = useState(false)
+  const onPaidRef = useRef(onPaid)
+  onPaidRef.current = onPaid
 
   async function handleUnlock() {
     setError('')
     try {
       setUnlocking(true)
-      const res = await fetch(`${API}/api/interview-prep/create-checkout`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ publicToken }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data?.checkoutUrl) {
-        throw new Error(data?.error || 'Could not start checkout.')
+      let url = checkoutUrl
+      if (!url) {
+        const res = await fetch(`${API}/api/interview-prep/create-checkout`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ publicToken }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data?.checkoutUrl) {
+          throw new Error(data?.error || 'Could not start checkout.')
+        }
+        url = data.checkoutUrl
       }
-      window.location.href = data.checkoutUrl
+      window.location.href = url
     } catch (err) {
       setError(err?.message || 'Could not start checkout.')
     } finally {
@@ -186,27 +171,97 @@ function PaywallCard({ publicToken, jobTitle, onPaid }) {
     }
   }
 
+  // Poll the order: awaiting_payment -> preparing -> ready | failed
+  useEffect(() => {
+    if (!publicToken) return
+    let cancelled = false
+    let timer = null
+    let attempts = 0
+
+    async function poll() {
+      let next = null
+      try {
+        const res = await fetch(`${API}/api/interview-prep/result/${encodeURIComponent(publicToken)}`)
+        const data = await res.json().catch(() => ({}))
+        if (cancelled) return
+        if (res.status === 404) { setStatus('missing'); return }
+        if (data?.status === 'ready' && Array.isArray(data?.questions)) {
+          onPaidRef.current({ questions: data.questions, jobTitle: data.jobTitle || jobTitle })
+          return
+        }
+        if (data?.status === 'failed') { setStatus('failed'); return }
+        if (data?.status === 'preparing' || data?.status === 'awaiting_payment') next = data.status
+      } catch {
+        // silent - keep polling
+      }
+      if (next) setStatus(next)
+      attempts += 1
+      if (attempts >= POLL_MAX) { setTimedOut(true); return }
+      timer = setTimeout(poll, POLL_MS)
+    }
+
+    poll()
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [publicToken, jobTitle])
+
+  if (status === null) {
+    return (
+      <PanelCard className="flex items-center gap-3 text-sm text-slate-300">
+        <Loader2 className="h-4 w-4 animate-spin text-indigo-300" />
+        Checking your order…
+      </PanelCard>
+    )
+  }
+
+  if (status === 'missing') {
+    return (
+      <PanelCard className="space-y-3">
+        <div className="text-lg font-semibold text-white">We couldn't find that order</div>
+        <p className="text-sm text-slate-300">
+          Check the link, or email <a className="text-indigo-300 underline" href="mailto:jobs@tarborojobs.com">jobs@tarborojobs.com</a>.
+        </p>
+      </PanelCard>
+    )
+  }
+
+  if (status === 'preparing') {
+    return (
+      <PanelCard className="space-y-3">
+        <div className="flex items-center gap-3 text-lg font-semibold text-white">
+          <Loader2 className="h-5 w-5 shrink-0 animate-spin text-indigo-300" />
+          Payment received — writing your interview prep…
+        </div>
+        <p className="text-sm text-slate-300">
+          {timedOut
+            ? "This is taking longer than usual. Refresh this page in a minute, or email jobs@tarborojobs.com if it still isn't here."
+            : 'This usually takes under a minute. Keep this page open and your questions will appear here.'}
+        </p>
+      </PanelCard>
+    )
+  }
+
+  if (status === 'failed') {
+    return (
+      <PanelCard className="space-y-3">
+        <div className="text-lg font-semibold text-white">Payment received, but we hit a snag</div>
+        <p className="text-sm text-slate-300">
+          Your payment went through, but we couldn't finish writing your interview prep pack. Please email{' '}
+          <a className="text-indigo-300 underline" href="mailto:jobs@tarborojobs.com">jobs@tarborojobs.com</a>{' '}
+          and we'll rerun it or refund you. Reference: <span className="font-mono text-slate-200">{publicToken}</span>
+        </p>
+      </PanelCard>
+    )
+  }
+
   return (
     <PanelCard className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="inline-flex items-center gap-3 rounded-2xl border border-indigo-400/30 bg-indigo-400/10 px-4 py-3 text-sm text-indigo-200">
-          <CheckCircle2 className="h-5 w-5 text-indigo-300" />
-          <span className="font-semibold">Your interview prep pack is ready!</span>
-        </div>
-        <div className="inline-flex items-center gap-2 text-xs text-slate-400">
-          <Lock className="h-4 w-4 text-indigo-300" /> Questions unlock after payment
-        </div>
-      </div>
-
       <div className="rounded-[24px] border border-indigo-400/30 bg-indigo-400/10 p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-xl">
-            <div className="text-lg font-semibold text-white">
-              Pay $4.99 to unlock 10 tailored interview questions &amp; answers
-            </div>
+            <div className="text-lg font-semibold text-white">Pay $4.99 to unlock 10 tailored interview questions &amp; answers</div>
             {jobTitle ? (
               <div className="mt-1 text-sm text-slate-300">
-                Customized for: <span className="text-indigo-200">{jobTitle}</span>
+                Customized for: <span className="text-slate-100 font-medium">{jobTitle}</span>
               </div>
             ) : null}
           </div>
@@ -215,37 +270,38 @@ function PaywallCard({ publicToken, jobTitle, onPaid }) {
             <div className="text-xs text-slate-400">one-time</div>
           </div>
         </div>
+
+        <ul className="mt-4 space-y-2">
+          {[
+            '10 role-specific questions',
+            'Model answers for each question',
+            'Mix of behavioral, technical & situational',
+          ].map((item) => (
+            <li key={item} className="flex items-center gap-2 text-sm text-slate-200">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-indigo-300" />
+              {item}
+            </li>
+          ))}
+        </ul>
+
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <PrimaryButton type="button" onClick={handleUnlock} loading={unlocking}>
-            <Sparkles className="h-4 w-4" />
             Unlock my prep pack – $4.99
           </PrimaryButton>
-          <span className="text-xs text-slate-400">Secure checkout via Square.</span>
+          <span className="text-xs text-slate-400">Secure checkout via Square. Your pack is written right after payment.</span>
         </div>
       </div>
 
-      <ul className="space-y-2 text-sm text-slate-300">
-        {[
-          '10 role-specific questions',
-          'Model answers for each question',
-          'Mix of behavioral, technical & situational',
-        ].map((item) => (
-          <li key={item} className="flex items-start gap-2">
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-indigo-300" />
-            <span>{item}</span>
-          </li>
-        ))}
-      </ul>
+      <ErrorBox message={error} />
 
-      {error ? (
-        <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-          {error}
+      {timedOut ? (
+        <div className="text-xs text-slate-400">Still waiting for your payment to confirm — refresh this page in a minute.</div>
+      ) : (
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span className="animate-spin h-3 w-3 rounded-full border border-slate-600 border-t-slate-300" />
+          If you've already paid, this page will update automatically.
         </div>
-      ) : null}
-
-      <div className="rounded-2xl border border-indigo-400/20 bg-indigo-400/5 px-4 py-3 text-xs text-indigo-200">
-        <Loader2 className="mb-1 inline h-3 w-3 animate-spin" /> If you've already paid, this page will update automatically.
-      </div>
+      )}
     </PanelCard>
   )
 }
@@ -337,6 +393,8 @@ export default function InterviewPrepPage({ onBack }) {
   const [publicToken, setPublicToken] = useState(tokenFromUrl || '')
   const [jobTitle, setJobTitle] = useState('')
   const [questions, setQuestions] = useState([])
+  const [checkoutUrl, setCheckoutUrl] = useState('')
+  const [fresh, setFresh] = useState(false)
 
   const handlePaid = useCallback((data) => {
     setQuestions(data.questions || [])
@@ -344,8 +402,10 @@ export default function InterviewPrepPage({ onBack }) {
     setMode('result')
   }, [])
 
-  function handleFormReady({ publicToken: token, jobTitle: title }) {
+  function handleFormReady({ publicToken: token, jobTitle: title, checkoutUrl: url }) {
     setPublicToken(token)
+    setCheckoutUrl(url)
+    setFresh(true)
     setJobTitle(title)
     setMode('paywall')
     if (typeof window !== 'undefined') {
@@ -358,6 +418,8 @@ export default function InterviewPrepPage({ onBack }) {
     setPublicToken('')
     setJobTitle('')
     setQuestions([])
+    setCheckoutUrl('')
+    setFresh(false)
     if (typeof window !== 'undefined') {
       window.history.pushState({}, '', '/?page=interview-prep')
     }
@@ -391,7 +453,13 @@ export default function InterviewPrepPage({ onBack }) {
       {mode === 'form' && <InterviewPrepForm onReady={handleFormReady} />}
 
       {mode === 'paywall' && (
-        <PaywallCard publicToken={publicToken} jobTitle={jobTitle} onPaid={handlePaid} />
+        <PaywallCard
+          publicToken={publicToken}
+          jobTitle={jobTitle}
+          checkoutUrl={checkoutUrl}
+          fresh={fresh}
+          onPaid={handlePaid}
+        />
       )}
 
       {mode === 'result' && (

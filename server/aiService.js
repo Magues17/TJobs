@@ -37,6 +37,9 @@ async function callClaude(prompt, maxTokens = 1024) {
       max_tokens: maxTokens,
       messages: [{ role: 'user', content: prompt }],
     }),
+    // Bounded so two attempts always finish well inside the server's
+    // 10-minute stale-claim window (AI_ORDER_STALE_MINUTES).
+    signal: AbortSignal.timeout(60000),
   });
 
   if (!res.ok) {

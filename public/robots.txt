@@ -5,7 +5,3 @@ Disallow: /api/
 Disallow: /jobs/*/apply
 
 Sitemap: https://tarborojobs.com/sitemap.xml
-
-
-User-agent: *
-Disallow: /

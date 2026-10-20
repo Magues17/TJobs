@@ -2,14 +2,15 @@
 //
 // Flow:
 //   1. User fills in name, job title, job description, and background.
-//   2. POST /api/cover-letter/generate → { publicToken } → 'paywall' mode.
-//   3. PaywallCard: pay $4.99 via Square. Also polls result endpoint every 4s
-//      so the result appears automatically after the Square redirect.
+//   2. POST /api/cover-letter/generate (saves the order, no AI yet) → { publicToken, checkoutUrl }
+//      → 'paywall' mode.
+//   3. PaywallCard: pay $4.99 via Square. Polls the result endpoint (4s, ~5 min):
+//      awaiting_payment / preparing / ready / failed. The AI runs only after payment.
 //   4. 'result' mode: display the letter with copy / start-over actions.
 //
 // URL handling: ?token=cl_... on mount → start in 'paywall' mode and poll.
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 const API = import.meta.env.VITE_API_BASE || ''
 
@@ -100,7 +101,7 @@ function CoverLetterForm({ onGenerated }) {
       if (!res.ok || !data?.publicToken) {
         throw new Error(data?.error || 'Could not generate your cover letter.')
       }
-      onGenerated({ publicToken: data.publicToken, jobTitle })
+      onGenerated({ publicToken: data.publicToken, jobTitle, checkoutUrl: data.checkoutUrl || '' })
     } catch (err) {
       setError(err?.message || 'Could not generate your cover letter.')
     } finally {
@@ -180,24 +181,36 @@ function CoverLetterForm({ onGenerated }) {
 
 // ---------- Paywall mode ----------------------------------------------------
 
-function PaywallCard({ publicToken, jobTitle, onUnlocked }) {
+const POLL_MS = 4000
+const POLL_MAX = 75 // ~5 minutes
+
+function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onUnlocked }) {
   const [unlocking, setUnlocking] = useState(false)
   const [error, setError] = useState('')
+  // null = first check pending (page opened from a Square return / bookmark)
+  const [status, setStatus] = useState(fresh ? 'awaiting_payment' : null)
+  const [timedOut, setTimedOut] = useState(false)
+  const onUnlockedRef = useRef(onUnlocked)
+  onUnlockedRef.current = onUnlocked
 
   async function handleUnlock() {
     setError('')
     try {
       setUnlocking(true)
-      const res = await fetch(`${API}/api/cover-letter/create-checkout`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ publicToken }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data?.checkoutUrl) {
-        throw new Error(data?.error || 'Could not start checkout.')
+      let url = checkoutUrl
+      if (!url) {
+        const res = await fetch(`${API}/api/cover-letter/create-checkout`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ publicToken }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data?.checkoutUrl) {
+          throw new Error(data?.error || 'Could not start checkout.')
+        }
+        url = data.checkoutUrl
       }
-      window.location.href = data.checkoutUrl
+      window.location.href = url
     } catch (err) {
       setError(err?.message || 'Could not start checkout.')
     } finally {
@@ -205,42 +218,94 @@ function PaywallCard({ publicToken, jobTitle, onUnlocked }) {
     }
   }
 
-  // Poll for paid status (covers the Square redirect → webhook gap)
-  const poll = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/api/cover-letter/result/${encodeURIComponent(publicToken)}`)
-      const data = await res.json().catch(() => ({}))
-      if (data?.paid && data?.letter) {
-        onUnlocked({ letter: data.letter, jobTitle: data.jobTitle || jobTitle })
-      }
-    } catch {
-      // silent — keep polling
-    }
-  }, [publicToken, jobTitle, onUnlocked])
-
+  // Poll the order: awaiting_payment -> preparing -> ready | failed
   useEffect(() => {
     if (!publicToken) return
-    poll()
+    let cancelled = false
+    let timer = null
     let attempts = 0
-    const id = setInterval(() => {
+
+    async function poll() {
+      let next = null
+      try {
+        const res = await fetch(`${API}/api/cover-letter/result/${encodeURIComponent(publicToken)}`)
+        const data = await res.json().catch(() => ({}))
+        if (cancelled) return
+        if (res.status === 404) { setStatus('missing'); return }
+        if (data?.status === 'ready' && data?.letter) {
+          onUnlockedRef.current({ letter: data.letter, jobTitle: data.jobTitle || jobTitle })
+          return
+        }
+        if (data?.status === 'failed') { setStatus('failed'); return }
+        if (data?.status === 'preparing' || data?.status === 'awaiting_payment') next = data.status
+      } catch {
+        // silent - keep polling
+      }
+      if (next) setStatus(next)
       attempts += 1
-      if (attempts >= 30) { clearInterval(id); return }
-      poll()
-    }, 4000)
-    return () => clearInterval(id)
-  }, [poll, publicToken])
+      if (attempts >= POLL_MAX) { setTimedOut(true); return }
+      timer = setTimeout(poll, POLL_MS)
+    }
+
+    poll()
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [publicToken, jobTitle])
+
+  if (status === null) {
+    return (
+      <PanelCard className="flex items-center gap-3 text-sm text-slate-300">
+        <span className="h-4 w-4 animate-spin rounded-full border-2 border-emerald-300 border-t-transparent" />
+        Checking your order…
+      </PanelCard>
+    )
+  }
+
+  if (status === 'missing') {
+    return (
+      <PanelCard className="space-y-3">
+        <div className="text-lg font-semibold text-white">We couldn't find that order</div>
+        <p className="text-sm text-slate-300">
+          Check the link, or email <a className="text-emerald-300 underline" href="mailto:jobs@tarborojobs.com">jobs@tarborojobs.com</a>.
+        </p>
+      </PanelCard>
+    )
+  }
+
+  if (status === 'preparing') {
+    return (
+      <PanelCard className="space-y-3">
+        <div className="flex items-center gap-3 text-lg font-semibold text-white">
+          <span className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-emerald-300 border-t-transparent" />
+          Payment received — writing your cover letter…
+        </div>
+        <p className="text-sm text-slate-300">
+          {timedOut
+            ? "This is taking longer than usual. Refresh this page in a minute, or email jobs@tarborojobs.com if it still isn't here."
+            : 'This usually takes under a minute. Keep this page open and your letter will appear here.'}
+        </p>
+      </PanelCard>
+    )
+  }
+
+  if (status === 'failed') {
+    return (
+      <PanelCard className="space-y-3">
+        <div className="text-lg font-semibold text-white">Payment received, but we hit a snag</div>
+        <p className="text-sm text-slate-300">
+          Your payment went through, but we couldn't finish writing your cover letter. Please email{' '}
+          <a className="text-emerald-300 underline" href="mailto:jobs@tarborojobs.com">jobs@tarborojobs.com</a>{' '}
+          and we'll rerun it or refund you. Reference: <span className="font-mono text-slate-200">{publicToken}</span>
+        </p>
+      </PanelCard>
+    )
+  }
 
   return (
     <PanelCard className="space-y-6">
-      <div className="inline-flex items-center gap-3 rounded-2xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-200">
-        <span className="text-emerald-300 text-lg">✓</span>
-        <span className="font-semibold">Your cover letter is ready!</span>
-      </div>
-
       <div className="rounded-[24px] border border-emerald-400/30 bg-emerald-400/10 p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-xl">
-            <div className="text-lg font-semibold text-white">Pay $4.99 to download your personalized cover letter</div>
+            <div className="text-lg font-semibold text-white">Pay $4.99 to get your personalized cover letter</div>
             {jobTitle ? (
               <div className="mt-1 text-sm text-slate-300">
                 Tailored for: <span className="text-slate-100 font-medium">{jobTitle}</span>
@@ -270,16 +335,20 @@ function PaywallCard({ publicToken, jobTitle, onUnlocked }) {
           <PrimaryButton type="button" onClick={handleUnlock} loading={unlocking}>
             Unlock my cover letter – $4.99
           </PrimaryButton>
-          <span className="text-xs text-slate-400">Secure checkout via Square.</span>
+          <span className="text-xs text-slate-400">Secure checkout via Square. Your letter is written right after payment.</span>
         </div>
       </div>
 
       <ErrorBox message={error} />
 
-      <div className="flex items-center gap-2 text-xs text-slate-500">
-        <span className="animate-spin h-3 w-3 rounded-full border border-slate-600 border-t-slate-300" />
-        Waiting for payment confirmation…
-      </div>
+      {timedOut ? (
+        <div className="text-xs text-slate-400">Still waiting for your payment to confirm — refresh this page in a minute.</div>
+      ) : (
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span className="animate-spin h-3 w-3 rounded-full border border-slate-600 border-t-slate-300" />
+          If you've already paid, this page will update automatically.
+        </div>
+      )}
     </PanelCard>
   )
 }
@@ -341,9 +410,13 @@ export default function CoverLetterPage() {
   const [publicToken, setPublicToken] = useState(initialToken || '')
   const [jobTitle, setJobTitle] = useState('')
   const [letter, setLetter] = useState('')
+  const [checkoutUrl, setCheckoutUrl] = useState('')
+  const [fresh, setFresh] = useState(false)
 
-  function handleGenerated({ publicToken: token, jobTitle: title }) {
+  function handleGenerated({ publicToken: token, jobTitle: title, checkoutUrl: url }) {
     setPublicToken(token)
+    setCheckoutUrl(url)
+    setFresh(true)
     setJobTitle(title)
     setMode('paywall')
     window.history.pushState({}, '', `/?page=cover-letter-result&token=${encodeURIComponent(token)}`)
@@ -360,6 +433,8 @@ export default function CoverLetterPage() {
     setPublicToken('')
     setJobTitle('')
     setLetter('')
+    setCheckoutUrl('')
+    setFresh(false)
     window.history.pushState({}, '', '/')
   }
 
@@ -386,6 +461,8 @@ export default function CoverLetterPage() {
         <PaywallCard
           publicToken={publicToken}
           jobTitle={jobTitle}
+          checkoutUrl={checkoutUrl}
+          fresh={fresh}
           onUnlocked={handleUnlocked}
         />
       )}

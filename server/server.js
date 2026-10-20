@@ -23,7 +23,14 @@ const app = express()
 
 const PORT = Number(process.env.PORT || 3000)
 const JOB_POST_EXPIRATION_DAYS = 14
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-change-this'
+const JWT_SECRET = (() => {
+  const configured = process.env.JWT_SECRET
+  if (configured && configured !== 'dev-only-secret-change-this') return configured
+  // Never sign with a known secret. A random one keeps the site up but signs
+  // everyone out on every restart, so set JWT_SECRET in the environment.
+  console.error('WARNING: JWT_SECRET is not set (or is the old default). Using a random secret; all sessions reset on restart. Set JWT_SECRET to fix this.')
+  return crypto.randomBytes(48).toString('hex')
+})()
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || process.env.ADMIN_BEARER_TOKEN || ''
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || 'jobs@tarborojobs.com')
   .split(',')
@@ -93,7 +100,17 @@ const RESUME_CHECKER_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 // endpoint flips the resume_checks row to paid in-process and returns a
 // same-origin URL that leads straight to the paid report - bypassing
 // Square entirely. Never set this in staging or production.
-const RESUME_CHECKER_DEV_BYPASS = parseBoolean(process.env.RESUME_CHECKER_DEV_BYPASS)
+// Guarded here so every bypass site (resume checker, AI orders) is covered:
+// it only takes effect outside NODE_ENV=production AND when APP_BASE_URL
+// points at localhost, so a stray env var in production cannot give free orders.
+const RESUME_CHECKER_DEV_BYPASS = (() => {
+  if (!parseBoolean(process.env.RESUME_CHECKER_DEV_BYPASS)) return false
+  let host = ''
+  try { host = new URL(APP_BASE_URL).hostname } catch {}
+  const local = process.env.NODE_ENV !== 'production' && ['localhost', '127.0.0.1', '[::1]'].includes(host)
+  if (!local) console.error('RESUME_CHECKER_DEV_BYPASS ignored: only allowed with a localhost APP_BASE_URL outside production.')
+  return local
+})()
 
 const projectRoot = path.resolve(__dirname, '..')
 const frontendDistDir = path.join(projectRoot, 'dist')
@@ -182,19 +199,23 @@ const corsOptions = {
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, resumesDir),
+  // Unguessable name, nothing from the uploader. Both upload filters only
+  // accept .pdf, so the extension is fixed.
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase() || '.pdf'
-    const base =
-      path
-        .basename(file.originalname || 'resume', ext)
-        .replace(/[^a-zA-Z0-9_-]/g, '-')
-        .replace(/-{2,}/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 80) || 'resume'
-
-    cb(null, `${Date.now()}-${base}${ext}`)
+    cb(null, `${Date.now()}-${crypto.randomBytes(16).toString('hex')}.pdf`)
   },
 })
+
+// Deletes the uploaded resume when the route answers with an error, so every
+// early return (validation, 404, 429, catch blocks) cleans up in one place.
+function discardUploadOnError(req, res, next) {
+  res.on('finish', () => {
+    if (req.file?.path && res.statusCode >= 400) {
+      fs.promises.unlink(req.file.path).catch(() => {})
+    }
+  })
+  next()
+}
 
 const resumeCheckerUpload = multer({
   storage,
@@ -250,9 +271,27 @@ function createIpRateLimiter(windowMs = RESUME_CHECKER_RATE_WINDOW_MS, max = RES
 const consumeResumeCheckerRate = createIpRateLimiter()
 const consumeCoverLetterRate = createIpRateLimiter()
 const consumeInterviewPrepRate = createIpRateLimiter()
+const consumeLoginRate = createIpRateLimiter(15 * 60 * 1000, 10)
+const consumeForgotPasswordRate = createIpRateLimiter(60 * 60 * 1000, 5)
+const consumeResetPasswordRate = createIpRateLimiter(15 * 60 * 1000, 10)
 
+// req.ip honours the 'trust proxy' setting below: it is the address the
+// nearest untrusted hop connected from, so a client cannot pick its own
+// bucket by sending a fake X-Forwarded-For. When the app is reached over a
+// Unix socket (no remote address) the last X-Forwarded-For entry is the one
+// the local proxy added.
 function getRequestIp(req) {
-  return String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()
+  return String(req.ip || String(req.headers['x-forwarded-for'] || '').split(',').pop() || '').trim()
+}
+
+// Express middleware form for routes that only need a per-IP cap.
+function rateLimitByIp(consume, error = 'Too many attempts. Please try again later.') {
+  return (req, res, next) => {
+    if (!consume(getRequestIp(req))) {
+      return res.status(429).json({ success: false, error })
+    }
+    next()
+  }
 }
 
 const upload = multer({
@@ -276,10 +315,16 @@ const upload = multer({
 })
 
 app.disable('x-powered-by')
+// Hostinger puts its reverse proxy in front of the app on the same host /
+// private network, so trust only loopback and private-range hops by default.
+// If a CDN with public edge IPs sits in front too, set TRUST_PROXY to the
+// number of proxy hops (e.g. 2) so req.ip is the visitor, not the edge.
+const TRUST_PROXY = safeTrim(process.env.TRUST_PROXY) || 'loopback, linklocal, uniquelocal'
+app.set('trust proxy', /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY)
 app.use(cors(corsOptions))
 app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf.toString('utf8') } }))
 app.use(express.urlencoded({ extended: true }))
-app.use('/uploads', express.static(uploadsRoot))
+// Resumes are not served statically; see /api/employer/resume-files/:name.
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -307,11 +352,6 @@ function normalizeEmail(value) {
 
 function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim())
-}
-
-function isAdminEmail(value) {
-  const normalized = normalizeEmail(value)
-  return !!normalized && ADMIN_EMAILS.includes(normalized)
 }
 
 function parseBoolean(value) {
@@ -591,6 +631,8 @@ function createAuthToken(user) {
       user_id: Number(user.id),
       employer_id: Number(user.employer_id),
       email: user.email,
+      // Bumped on password change/reset so older tokens stop working.
+      tv: Number(user.token_version || 0),
     },
     JWT_SECRET,
     { expiresIn: '7d' }
@@ -600,8 +642,12 @@ function createAuthToken(user) {
 function isEmployerEligible(employer) {
   if (!employer) return false
   if (employer.access_status !== 'active') return false
-  if (!['active', 'canceled'].includes(employer.subscription_status || 'active')) return false
-  return true
+  const status = employer.subscription_status || 'active'
+  if (status === 'active') return true
+  // A canceled plan keeps access only until the period it paid for ends.
+  if (status !== 'canceled') return false
+  const periodEnd = parseDateOrNull(employer.current_period_end)
+  return !!periodEnd && periodEnd > new Date()
 }
 
 function formatPayDisplay(payMin, payMax, payType) {
@@ -1438,12 +1484,42 @@ const AI_ORDER_COLUMNS = [
   { name: 'ai_cost_cents', sql: 'ADD COLUMN ai_cost_cents DECIMAL(10,4) NOT NULL DEFAULT 0' },
 ]
 
+// A failed ALTER is logged and skipped rather than stopping startup: only
+// the AI order routes need these columns, and they fail on their own.
 async function ensureAiOrderColumns(tableName) {
   for (const column of AI_ORDER_COLUMNS) {
-    const exists = await tableColumnExists(tableName, column.name)
-    if (!exists) {
-      await pool.query(`ALTER TABLE ${tableName} ${column.sql}`)
+    try {
+      const exists = await tableColumnExists(tableName, column.name)
+      if (!exists) {
+        await pool.query(`ALTER TABLE ${tableName} ${column.sql}`)
+      }
+    } catch (error) {
+      console.error(`STARTUP: could not add ${tableName}.${column.name}; AI orders may fail:`, error?.message || error)
     }
+  }
+}
+
+// is_admin: admin rights are a stored flag, not "email is in ADMIN_EMAILS".
+// token_version: bumped on password change/reset to revoke older tokens.
+// If either ALTER fails, startup continues but every employer/admin session
+// query selects the missing column and errors, so auth fails closed.
+async function ensureEmployerUserAuthColumns() {
+  try {
+    if (!(await tableColumnExists('employer_users', 'token_version'))) {
+      await pool.query('ALTER TABLE employer_users ADD COLUMN token_version INT NOT NULL DEFAULT 0')
+    }
+
+    if (!(await tableColumnExists('employer_users', 'is_admin'))) {
+      await pool.query('ALTER TABLE employer_users ADD COLUMN is_admin TINYINT(1) NOT NULL DEFAULT 0')
+      // One-time carry-over, only on the startup that creates the column:
+      // whoever holds an ADMIN_EMAILS address right now stays admin. Later
+      // email changes never grant admin; set is_admin by hand in the DB.
+      if (ADMIN_EMAILS.length) {
+        await pool.query('UPDATE employer_users SET is_admin = 1 WHERE LOWER(email) IN (?)', [ADMIN_EMAILS])
+      }
+    }
+  } catch (error) {
+    console.error('STARTUP: could not add employer_users auth columns; employer and admin sign-in will fail until fixed:', error?.message || error)
   }
 }
 
@@ -1568,11 +1644,13 @@ async function requireAdminAuth(req, res, next) {
       const decoded = jwt.verify(token, JWT_SECRET)
       const session = await loadEmployerSessionByUserId(decoded.user_id)
 
+      // Admin rights come from the stored flag, never from the (editable) email.
       if (
         session &&
         Number(session.employer_id) === Number(decoded.employer_id) &&
+        tokenVersionMatches(decoded, session) &&
         session.is_active &&
-        isAdminEmail(session.email)
+        session.is_admin
       ) {
         req.admin = {
           authenticated: true,
@@ -1596,6 +1674,10 @@ async function requireAdminAuth(req, res, next) {
   })
 }
 
+function tokenVersionMatches(decoded, session) {
+  return (decoded.tv ?? 0) === Number(session.token_version || 0)
+}
+
 async function loadEmployerSessionByUserId(userId) {
   const [rows] = await pool.query(
     `
@@ -1605,6 +1687,8 @@ async function loadEmployerSessionByUserId(userId) {
       eu.email,
       eu.password_hash,
       eu.is_active,
+      eu.is_admin,
+      eu.token_version,
       e.business_name,
       e.industry,
       e.contact_name,
@@ -1659,7 +1743,7 @@ async function requireEmployerAuth(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET)
     const session = await loadEmployerSessionByUserId(decoded.user_id)
 
-    if (!session) {
+    if (!session || !tokenVersionMatches(decoded, session)) {
       return res.status(401).json({
         success: false,
         error: 'Employer session not found.',
@@ -1680,7 +1764,7 @@ async function requireEmployerAuth(req, res, next) {
       })
     }
 
-    const isAdmin = isAdminEmail(session.email)
+    const isAdmin = !!session.is_admin
 
     req.auth = {
       token,
@@ -1892,7 +1976,7 @@ app.get('/api/health', async (req, res) => {
   }
 })
 
-app.post('/api/jobseekers', upload.single('resume_file'), async (req, res) => {
+app.post('/api/jobseekers', discardUploadOnError, upload.single('resume_file'), async (req, res) => {
   try {
     const fullName = safeTrim(req.body.full_name, 255)
     const email = normalizeEmail(req.body.email)
@@ -2016,7 +2100,7 @@ app.get('/api/jobposts/:id', async (req, res) => {
   }
 })
 
-app.post('/api/jobposts/:id/apply', upload.single('resume_file'), async (req, res) => {
+app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_file'), async (req, res) => {
   try {
     await expireOpenJobs()
     const jobId = Number(req.params.id)
@@ -2566,13 +2650,13 @@ function parseReportJson(value) {
 // preview + full report, and return the preview shape + the public token.
 app.post(
   '/api/resume-checker/preview',
+  discardUploadOnError,
   resumeCheckerUpload.single('resume'),
   async (req, res) => {
     let savedFilePath = null
     try {
       // Rate limit per requester IP.
-      const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()
-      if (!consumeResumeCheckerRate(ip)) {
+      if (!consumeResumeCheckerRate(getRequestIp(req))) {
         if (req.file?.path) {
           try { await fs.promises.unlink(req.file.path) } catch {}
         }
@@ -3232,7 +3316,7 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
 
     const [existingUsers] = await connection.query(
       `
-      SELECT id
+      SELECT id, token_version
       FROM employer_users
       WHERE employer_id = ?
       LIMIT 1
@@ -3241,9 +3325,11 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
     )
 
     let employerUserId = null
+    let tokenVersion = 0
 
     if (existingUsers.length > 0) {
       employerUserId = existingUsers[0].id
+      tokenVersion = Number(existingUsers[0].token_version || 0) + 1
 
       await connection.query(
         `
@@ -3252,6 +3338,7 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
           email = ?,
           password_hash = ?,
           is_active = 1,
+          token_version = token_version + 1,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         `,
@@ -3293,6 +3380,7 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
       id: employerUserId,
       employer_id: employerId,
       email,
+      token_version: tokenVersion,
     })
 
     res.json({
@@ -3314,7 +3402,7 @@ app.post('/api/employer-onboarding/complete', async (req, res) => {
   }
 })
 
-app.post('/api/employer-auth/login', async (req, res) => {
+app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many login attempts. Please try again later.'), async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email)
     const password = String(req.body.password || '')
@@ -3334,9 +3422,12 @@ app.post('/api/employer-auth/login', async (req, res) => {
         eu.email,
         eu.password_hash,
         eu.is_active,
+        eu.is_admin,
+        eu.token_version,
         e.business_name,
         e.subscription_status,
         e.access_status,
+        e.current_period_end,
         e.onboarding_completed
       FROM employer_users eu
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -3362,7 +3453,7 @@ app.post('/api/employer-auth/login', async (req, res) => {
       })
     }
 
-    const isAdmin = isAdminEmail(user.email)
+    const isAdmin = !!user.is_admin
 
     if (!isAdmin && !user.onboarding_completed) {
       return res.status(403).json({
@@ -3417,7 +3508,7 @@ app.post('/api/employer-auth/login', async (req, res) => {
   }
 })
 
-app.post('/api/employer-auth/forgot-password', async (req, res) => {
+app.post('/api/employer-auth/forgot-password', rateLimitByIp(consumeForgotPasswordRate, 'Too many password reset requests. Please try again later.'), async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email)
     const genericMessage = 'If that email exists, a password reset link has been sent.'
@@ -3438,7 +3529,8 @@ app.post('/api/employer-auth/forgot-password', async (req, res) => {
         e.business_name,
         e.onboarding_completed,
         e.subscription_status,
-        e.access_status
+        e.access_status,
+        e.current_period_end
       FROM employer_users eu
       INNER JOIN employers e ON e.id = eu.employer_id
       WHERE LOWER(eu.email) = ?
@@ -3516,7 +3608,7 @@ app.post('/api/employer-auth/forgot-password', async (req, res) => {
   }
 })
 
-app.get('/api/employer-auth/reset-password/validate', async (req, res) => {
+app.get('/api/employer-auth/reset-password/validate', rateLimitByIp(consumeResetPasswordRate), async (req, res) => {
   try {
     const token = safeTrim(req.query.token, 255)
 
@@ -3542,7 +3634,8 @@ app.get('/api/employer-auth/reset-password/validate', async (req, res) => {
         e.business_name,
         e.onboarding_completed,
         e.subscription_status,
-        e.access_status
+        e.access_status,
+        e.current_period_end
       FROM employer_password_reset_tokens prt
       INNER JOIN employer_users eu ON eu.id = prt.employer_user_id
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -3592,7 +3685,7 @@ app.get('/api/employer-auth/reset-password/validate', async (req, res) => {
   }
 })
 
-app.post('/api/employer-auth/reset-password', async (req, res) => {
+app.post('/api/employer-auth/reset-password', rateLimitByIp(consumeResetPasswordRate), async (req, res) => {
   const connection = await pool.getConnection()
 
   try {
@@ -3632,7 +3725,8 @@ app.post('/api/employer-auth/reset-password', async (req, res) => {
         e.business_name,
         e.onboarding_completed,
         e.subscription_status,
-        e.access_status
+        e.access_status,
+        e.current_period_end
       FROM employer_password_reset_tokens prt
       INNER JOIN employer_users eu ON eu.id = prt.employer_user_id
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -3678,6 +3772,7 @@ app.post('/api/employer-auth/reset-password', async (req, res) => {
       UPDATE employer_users
       SET
         password_hash = ?,
+        token_version = token_version + 1,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
       `,
@@ -3919,14 +4014,19 @@ app.patch('/api/employer/account/password', requireEmployerAuth, async (req, res
       UPDATE employer_users
       SET
         password_hash = ?,
+        token_version = token_version + 1,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
       `,
       [passwordHash, employerUserId]
     )
 
+    // Older tokens are now rejected; hand this browser a fresh one.
+    const refreshedSession = await loadEmployerSessionByUserId(employerUserId)
+
     res.json({
       success: true,
+      auth_token: createAuthToken(refreshedSession),
       message: 'Password updated successfully.',
     })
   } catch (error) {
@@ -4452,6 +4552,62 @@ app.get('/api/employer/stats', requireEmployerAuth, requireEligibleEmployer, asy
     })
   }
 })
+
+// Resume PDFs are never public. An employer gets a file only if it belongs to
+// an applicant they can already see in GET /api/employer/resumes
+// (js.employer_id) or an application to one of their own job posts; admins get
+// any. Everything else is a 404 so file names cannot be probed. The path comes
+// from the stored DB value, never from the request.
+async function sendResumeFile(req, res, employerId) {
+  const notFound = () => res.status(404).json({ success: false, error: 'Resume not found.' })
+
+  try {
+    const name = String(req.params.name || '')
+    if (!/^[A-Za-z0-9._-]+$/.test(name) || path.basename(name) !== name) return notFound()
+
+    const params = [`/uploads/resumes/${name}`]
+    let access = ''
+    if (employerId !== null) {
+      access = 'AND (js.employer_id = ? OR jp.employer_id = ?)'
+      params.push(employerId, employerId)
+    }
+
+    const [rows] = await pool.query(
+      `
+      SELECT js.resume_file_url
+      FROM job_seekers js
+      LEFT JOIN job_posts jp ON jp.id = js.job_post_id
+      WHERE js.resume_file_url = ?
+        ${access}
+      LIMIT 1
+      `,
+      params
+    )
+    if (!rows.length) return notFound()
+
+    const filePath = path.resolve(resumesDir, path.basename(String(rows[0].resume_file_url)))
+    if (path.dirname(filePath) !== path.resolve(resumesDir) || !fs.existsSync(filePath)) return notFound()
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': 'attachment; filename="resume.pdf"',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, no-store',
+    })
+    res.sendFile(filePath, (error) => {
+      if (error && !res.headersSent) notFound()
+    })
+  } catch (error) {
+    console.error('sendResumeFile error:', error)
+    res.status(500).json({ success: false, error: 'Failed to load resume.' })
+  }
+}
+
+app.get('/api/employer/resume-files/:name', requireEmployerAuth, requireEligibleEmployer, (req, res) =>
+  sendResumeFile(req, res, req.auth.employer_id)
+)
+
+app.get('/api/admin/resume-files/:name', requireAdminAuth, (req, res) => sendResumeFile(req, res, null))
 
 app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, async (req, res) => {
   try {
@@ -5611,7 +5767,8 @@ const COVER_LETTER_PRICE_CENTS = 499
 const INTERVIEW_PREP_PRICE_CENTS = 499
 const AI_ORDER_MAX_ATTEMPTS = 2 // first try + one retry
 // A 'generating' claim older than this is treated as lost (for example a
-// restart mid-call) and may be claimed again.
+// restart mid-call) and may be claimed again. Keep it well above
+// AI_ORDER_MAX_ATTEMPTS x the 60 s Anthropic fetch timeout in aiService.js.
 const AI_ORDER_STALE_MINUTES = 10
 
 const AI_PRODUCTS = {
@@ -5781,9 +5938,15 @@ async function runAiOrder(productKey, orderId, options = {}) {
   }
 
   const usageParams = [attempts, spent.inputTokens, spent.outputTokens, roundCents(spent.costCents)]
+  // Only write if the claim is still ours: a stale-claim takeover changes
+  // ai_started_at, and that run owns the row from then on.
+  const ownClaimSql = `AND ai_status = 'generating' AND ai_started_at = ?`
+  const lostClaim = (result) => {
+    if (result?.affectedRows === 0) console.warn(`[ai-order] ${productKey} #${orderId} claim was taken over; result discarded`)
+  }
 
   if (generated) {
-    await pool.query(
+    const [saved] = await pool.query(
       `
       UPDATE ${product.table}
       SET
@@ -5795,17 +5958,18 @@ async function runAiOrder(productKey, orderId, options = {}) {
         ai_input_tokens = ai_input_tokens + ?,
         ai_output_tokens = ai_output_tokens + ?,
         ai_cost_cents = ai_cost_cents + ?
-      WHERE id = ?
+      WHERE id = ? ${ownClaimSql}
       `,
-      [generated.content, ...usageParams, orderId]
+      [generated.content, ...usageParams, orderId, row.ai_started_at]
     )
+    lostClaim(saved)
     console.log(
       `[ai-order] ${productKey} #${orderId} ready: ${spent.inputTokens} in / ${spent.outputTokens} out tokens, about ${roundCents(spent.costCents)} cents`
     )
     return 'ready'
   }
 
-  await pool.query(
+  const [failed] = await pool.query(
     `
     UPDATE ${product.table}
     SET
@@ -5816,10 +5980,11 @@ async function runAiOrder(productKey, orderId, options = {}) {
       ai_input_tokens = ai_input_tokens + ?,
       ai_output_tokens = ai_output_tokens + ?,
       ai_cost_cents = ai_cost_cents + ?
-    WHERE id = ?
+    WHERE id = ? ${ownClaimSql}
     `,
-    [safeTrim(lastError?.message || 'AI generation failed.', 2000), ...usageParams, orderId]
+    [safeTrim(lastError?.message || 'AI generation failed.', 2000), ...usageParams, orderId, row.ai_started_at]
   )
+  lostClaim(failed)
   return 'failed'
 }
 
@@ -6225,8 +6390,10 @@ async function startServer() {
   await ensureEmployerPendingCheckoutsTable()
   await ensureResumeChecksTable()
   await ensureJobScraperColumns()
-  await ensureCoverLetterTable()
-  await ensureInterviewPrepTable()
+  await ensureEmployerUserAuthColumns()
+  // The AI order tables only serve the AI routes; never let them stop the site.
+  await ensureCoverLetterTable().catch((error) => console.error('STARTUP: cover letter table setup failed:', error?.message || error))
+  await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))
   await expireOpenJobs()
 
   app.listen(PORT, () => {

@@ -35,6 +35,7 @@ import {
 } from './employer/api'
 import {
   getStoredEmployerToken,
+  setStoredEmployerToken,
   clearStoredEmployerToken,
 } from './employer/auth'
 import {
@@ -74,7 +75,6 @@ import AdminLoginPage from './admin/AdminLoginPage'
 import AdminDashboardPage from './admin/AdminDashboardPage'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
-const FILE_BASE = (import.meta.env.VITE_FILE_BASE || '').replace(/\/$/, '')
 
 const industries = [
   'All Industries',
@@ -2285,7 +2285,9 @@ export default function TarboroJobsHomepage() {
 
   async function updateEmployerPassword(payload) {
     const token = getStoredEmployerToken()
-    await apiUpdateEmployerPassword(token, payload)
+    const data = await apiUpdateEmployerPassword(token, payload)
+    // The server revokes older tokens on a password change and returns a new one.
+    if (data?.auth_token) setStoredEmployerToken(data.auth_token)
   }
 
   async function createEmployerJob(payload) {
@@ -2690,7 +2692,6 @@ export default function TarboroJobsHomepage() {
           employerPayTypes={employerPayTypes}
           employerResumeTypes={employerResumeTypes}
           candidateStatuses={candidateStatuses}
-          fileBase={FILE_BASE}
           CandidateActionPanel={CandidateActionPanel}
         />
       )}
