@@ -656,10 +656,17 @@ function isEmployerEligible(employer) {
   if (!employer) return false
   if (employer.access_status !== 'active') return false
   const status = employer.subscription_status || 'active'
-  if (status === 'active') return true
-  // A canceled plan keeps access only until the period it paid for ends.
-  if (status !== 'canceled') return false
   const periodEnd = parseDateOrNull(employer.current_period_end)
+  if (status === 'active') {
+    // A failed renewal leaves Square at ACTIVE with an old paid-through date,
+    // so a Square-billed plan lapses once that date is past the grace period.
+    // Employers with no Square link (scraped listings, comped) never lapse here.
+    if (!isSquareBilledEmployer(employer) || !periodEnd) return true
+    return periodEnd.getTime() + SUBSCRIPTION_GRACE_MS > Date.now()
+  }
+  // A canceled plan keeps access only until the period it paid for ends.
+  // 'paused' and 'pending' (and anything unknown) have no access.
+  if (status !== 'canceled') return false
   return !!periodEnd && periodEnd > new Date()
 }
 
@@ -885,6 +892,197 @@ async function createSquareEmployerCheckoutLink({ checkoutRef, email, businessNa
 
 async function fetchSquarePayment(paymentId) {
   return squareApiRequest(`/v2/payments/${encodeURIComponent(paymentId)}`)
+}
+
+// ── Square subscription sync ─────────────────────────────────────────────────
+// The webhook only hears about payments, so renewals, failed renewals,
+// cancellations and pauses are read back from Square's Subscriptions API:
+// right after the first payment, on a full refund, daily for everyone, on
+// demand from an employer request, and from the admin Sync button.
+const SUBSCRIPTION_GRACE_MS = 3 * 24 * 60 * 60 * 1000
+const SUBSCRIPTION_SYNC_MIN_AGE_HOURS = 20
+const SUBSCRIPTION_ON_DEMAND_AGE_MS = 24 * 60 * 60 * 1000
+const SUBSCRIPTION_ON_DEMAND_THROTTLE_MS = 60 * 60 * 1000
+const SQUARE_SUBSCRIPTION_STATUS_MAP = {
+  ACTIVE: 'active',
+  CANCELED: 'canceled',
+  DEACTIVATED: 'canceled',
+  PAUSED: 'paused',
+  // PENDING is deliberately unmapped: a payment-link subscription can still be
+  // PENDING when the first payment lands, and that must not lock out a payer.
+}
+const SQUARE_LIVE_SUBSCRIPTION_STATUSES = ['ACTIVE', 'PAUSED', 'PENDING']
+const EMPLOYER_SUBSCRIPTION_COLUMNS =
+  'id, square_customer_id, square_subscription_id, subscription_status, current_period_end, subscription_synced_at'
+
+function isSquareSubscriptionSyncConfigured() {
+  return Boolean(SQUARE_ACCESS_TOKEN && SQUARE_SUBSCRIPTION_PLAN_ID)
+}
+
+function isSquareBilledEmployer(employer) {
+  return Boolean(employer?.square_subscription_id || employer?.square_customer_id)
+}
+
+// Square dates are YYYY-MM-DD; a paid-through date covers that whole UTC day.
+function squareDateEndOfDayUtc(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) ? new Date(`${value}T23:59:59.000Z`) : null
+}
+
+let cachedSquarePlanVariationIds = null
+
+// Every id a subscription to our plan can carry: the configured id itself
+// (when it is a plan variation) plus all variations of it (when it is a plan).
+async function getSquarePlanVariationIds() {
+  if (cachedSquarePlanVariationIds) return cachedSquarePlanVariationIds
+  const response = await squareApiRequest(
+    `/v2/catalog/object/${encodeURIComponent(SQUARE_SUBSCRIPTION_PLAN_ID)}`
+  )
+  const ids = new Set([SQUARE_SUBSCRIPTION_PLAN_ID])
+  for (const variation of response?.object?.subscription_plan_data?.subscription_plan_variations || []) {
+    if (variation?.id) ids.add(variation.id)
+  }
+  cachedSquarePlanVariationIds = ids
+  return ids
+}
+
+// Stores what Square says about one employer's subscription. Any Square or
+// network error throws before anything is written, so an outage or a bad
+// token never changes anyone's access. Returns { updated, status,
+// squareStatus, message } (message set when nothing could be mapped).
+async function syncEmployerSubscription(employer) {
+  const employerId = Number(employer?.id)
+  if (!employerId || !isSquareBilledEmployer(employer)) {
+    return { updated: false, message: 'Employer has no Square customer or subscription.' }
+  }
+  if (!isSquareSubscriptionSyncConfigured()) {
+    return { updated: false, message: 'Square subscription sync is not configured.' }
+  }
+
+  let subscriptions
+  if (employer.square_customer_id) {
+    const filter = { customer_ids: [employer.square_customer_id] }
+    if (SQUARE_LOCATION_ID) filter.location_ids = [SQUARE_LOCATION_ID]
+    // ponytail: first page only; one customer has a handful of subscriptions.
+    const response = await squareApiRequest('/v2/subscriptions/search', {
+      method: 'POST',
+      body: { query: { filter } },
+    })
+    subscriptions = response?.subscriptions || []
+  } else {
+    const response = await squareApiRequest(
+      `/v2/subscriptions/${encodeURIComponent(employer.square_subscription_id)}`
+    )
+    subscriptions = response?.subscription ? [response.subscription] : []
+  }
+
+  const planIds = await getSquarePlanVariationIds()
+  const isLive = (entry) => (SQUARE_LIVE_SUBSCRIPTION_STATUSES.includes(entry.status) ? 1 : 0)
+  const subscription = subscriptions
+    .filter((entry) => planIds.has(entry?.plan_variation_id) || planIds.has(entry?.plan_id))
+    .sort((a, b) => isLive(b) - isLive(a) || String(b.created_at || '').localeCompare(String(a.created_at || '')))[0]
+  const nextStatus = SQUARE_SUBSCRIPTION_STATUS_MAP[subscription?.status]
+
+  if (!subscription || !nextStatus) {
+    // Square answered but nothing maps: leave access alone for the owner to
+    // decide, and mark it checked so the daily run does not retry hourly.
+    await pool.query(`UPDATE employers SET subscription_synced_at = CURRENT_TIMESTAMP WHERE id = ?`, [employerId])
+    const message = subscription
+      ? `Square subscription ${subscription.id} has unknown status "${subscription.status}".`
+      : 'Square has no subscription to our plan for this customer.'
+    console.warn(`[subscriptions] employer ${employerId}: ${message} Access left as-is.`)
+    return { updated: false, message }
+  }
+
+  // An ACTIVE subscription with a future canceled_date stays 'active' until
+  // Square flips it to CANCELED; its paid-through date (plus grace) still
+  // bounds access if the sync stops running.
+  const periodEnd =
+    squareDateEndOfDayUtc(subscription.charged_through_date) ||
+    (subscription.canceled_date ? parseDateOrNull(`${subscription.canceled_date}T00:00:00.000Z`) : null)
+  const subscriptionId = subscription.id || employer.square_subscription_id || null
+  const oldPeriodEnd = parseDateOrNull(employer.current_period_end)
+
+  await pool.query(
+    `
+    UPDATE employers
+    SET
+      square_subscription_id = ?,
+      subscription_status = ?,
+      current_period_end = COALESCE(?, current_period_end),
+      subscription_synced_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+    `,
+    [subscriptionId, nextStatus, periodEnd, employerId]
+  )
+
+  const updated =
+    (employer.subscription_status || 'active') !== nextStatus ||
+    (employer.square_subscription_id || null) !== subscriptionId ||
+    (!!periodEnd && periodEnd.getTime() !== oldPeriodEnd?.getTime())
+  if (updated) {
+    console.log(`[subscriptions] employer ${employerId}: Square ${subscription.status} -> ${nextStatus}, paid through ${subscription.charged_through_date || 'unknown'}`)
+  }
+  return { updated, status: nextStatus, squareStatus: subscription.status }
+}
+
+// First payment: learn the subscription id and paid-through date right away.
+// Called after finalize has committed; the webhook never waits on it.
+async function syncEmployerAfterCheckout(checkout, payment) {
+  const [rows] = await pool.query(
+    `SELECT ${EMPLOYER_SUBSCRIPTION_COLUMNS} FROM employers WHERE email = ? ORDER BY id DESC LIMIT 1`,
+    [normalizeEmail(checkout.email)]
+  )
+  const employer = rows[0]
+  if (!employer) return null
+  // A returning (already onboarded) employer is not re-finalized, so its
+  // customer id is only learned here.
+  if (!employer.square_customer_id && payment.customer_id) {
+    await pool.query(
+      `UPDATE employers SET square_customer_id = ? WHERE id = ? AND (square_customer_id IS NULL OR square_customer_id = '')`,
+      [payment.customer_id, employer.id]
+    )
+    employer.square_customer_id = payment.customer_id
+  }
+  return syncEmployerSubscription(employer)
+}
+
+function isFullyRefundedPayment(payment) {
+  const amount = Number(payment?.amount_money?.amount || 0)
+  return amount > 0 && Number(payment?.refunded_money?.amount || 0) >= amount
+}
+
+// A full refund may mean the owner canceled in Square; re-read the truth.
+// Never revokes on its own: a still-ACTIVE subscription is only logged.
+async function syncEmployersForRefundedPayment(payment) {
+  const [rows] = await pool.query(
+    `SELECT ${EMPLOYER_SUBSCRIPTION_COLUMNS} FROM employers WHERE square_customer_id = ?`,
+    [payment.customer_id]
+  )
+  for (const employer of rows) {
+    const result = await syncEmployerSubscription(employer)
+    if (result.squareStatus === 'ACTIVE') {
+      console.warn(`[subscriptions] payment ${payment.id} was fully refunded but employer ${employer.id}'s Square subscription is still ACTIVE; access left as-is for the owner to decide.`)
+    }
+  }
+}
+
+const subscriptionSyncAttempts = new Map()
+
+// Cheap on-demand check from employer requests: never blocks the request,
+// at most once per employer per hour.
+function maybeSyncEmployerSubscriptionInBackground(employer) {
+  const employerId = Number(employer?.id)
+  if (!employerId || !isSquareSubscriptionSyncConfigured() || !isSquareBilledEmployer(employer)) return
+  const syncedAt = parseDateOrNull(employer.subscription_synced_at)
+  const stale = !syncedAt || Date.now() - syncedAt.getTime() > SUBSCRIPTION_ON_DEMAND_AGE_MS
+  // Locked-out employers re-check sooner so a fixed card restores access.
+  if (!stale && isEmployerEligible(employer)) return
+  const lastAttempt = subscriptionSyncAttempts.get(employerId)
+  if (lastAttempt && Date.now() - lastAttempt < SUBSCRIPTION_ON_DEMAND_THROTTLE_MS) return
+  subscriptionSyncAttempts.set(employerId, Date.now())
+  syncEmployerSubscription(employer).catch((error) =>
+    console.error(`[subscriptions] on-demand sync for employer ${employerId} failed; access left as-is:`, error?.message || error)
+  )
 }
 
 function verifySquareWebhookSignature({ signatureHeader, requestBody }) {
@@ -1536,6 +1734,19 @@ async function ensureEmployerUserAuthColumns() {
   }
 }
 
+// subscription_synced_at: when Square was last asked about this employer's
+// subscription. If the ALTER fails, employer session queries select the
+// missing column and error, so employer sign-in fails closed.
+async function ensureEmployerSubscriptionSyncColumn() {
+  try {
+    if (!(await tableColumnExists('employers', 'subscription_synced_at'))) {
+      await pool.query('ALTER TABLE employers ADD COLUMN subscription_synced_at DATETIME NULL DEFAULT NULL')
+    }
+  } catch (error) {
+    console.error('STARTUP: could not add employers.subscription_synced_at; employer sign-in will fail until fixed:', error?.message || error)
+  }
+}
+
 async function ensureCoverLetterTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS cover_letter_requests (
@@ -1723,6 +1934,9 @@ async function loadEmployerSessionByUserId(userId) {
       e.subscription_status,
       e.access_status,
       e.current_period_end,
+      e.square_customer_id,
+      e.square_subscription_id,
+      e.subscription_synced_at,
       e.onboarding_completed
     FROM employer_users eu
     INNER JOIN employers e ON e.id = eu.employer_id
@@ -1816,6 +2030,13 @@ async function requireEmployerAuth(req, res, next) {
         current_period_end: session.current_period_end,
         onboarding_completed: !!session.onboarding_completed,
       },
+      // Kept apart from employer, which /me returns to the browser.
+      billing: {
+        id: Number(session.employer_id),
+        square_customer_id: session.square_customer_id,
+        square_subscription_id: session.square_subscription_id,
+        subscription_synced_at: session.subscription_synced_at,
+      },
       admin: {
         authenticated: isAdmin,
         is_admin: isAdmin,
@@ -1848,7 +2069,10 @@ function requireEligibleEmployer(req, res, next) {
     })
   }
 
-  if (!isEmployerEligible(req.auth.employer)) {
+  const employer = { ...req.auth.employer, ...req.auth.billing }
+  maybeSyncEmployerSubscriptionInBackground(employer)
+
+  if (!isEmployerEligible(employer)) {
     return res.status(403).json({
       success: false,
       error: 'Your employer account is not eligible for this action.',
@@ -2471,6 +2695,14 @@ app.post('/api/square/webhook', async (req, res) => {
       return res.status(200).json({ success: true, type: aiProductType })
     }
 
+    // A full refund of any employer payment (first or renewal) re-reads the
+    // subscription from Square; the webhook never waits on it.
+    if (eventType === 'payment.updated' && payment.customer_id && isFullyRefundedPayment(payment)) {
+      syncEmployersForRefundedPayment(payment).catch((error) =>
+        console.error(`[subscriptions] refund sync for payment ${payment.id} failed; access left as-is:`, error?.message || error)
+      )
+    }
+
     let checkout = null
 
     if (payment.order_id) {
@@ -2526,6 +2758,9 @@ app.post('/api/square/webhook', async (req, res) => {
     if (paymentStatus === 'completed') {
       try {
         await finalizeVerifiedEmployerCheckoutByRef(checkout.checkout_ref)
+        syncEmployerAfterCheckout(checkout, payment).catch((error) =>
+          console.error(`[subscriptions] post-checkout sync for ${checkout.checkout_ref} failed; access left as-is:`, error?.message || error)
+        )
       } catch (finalizeError) {
         console.error('POST /api/square/webhook finalize error:', finalizeError)
       }
@@ -3490,6 +3725,9 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
         e.subscription_status,
         e.access_status,
         e.current_period_end,
+        e.square_customer_id,
+        e.square_subscription_id,
+        e.subscription_synced_at,
         e.onboarding_completed
       FROM employer_users eu
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -3529,6 +3767,9 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
     }
 
     if (!isAdmin && !isEmployerEligible(user)) {
+      // Locked out employers cannot reach requireEligibleEmployer, so a renewal
+      // that landed since the last sync is picked up from here.
+      maybeSyncEmployerSubscriptionInBackground({ ...user, id: user.employer_id })
       return res.status(403).json({
         success: false,
         error: 'This employer account is not eligible for login.',
@@ -3589,7 +3830,10 @@ app.post('/api/employer-auth/forgot-password', rateLimitByIp(consumeForgotPasswo
         e.onboarding_completed,
         e.subscription_status,
         e.access_status,
-        e.current_period_end
+        e.current_period_end,
+        e.square_customer_id,
+        e.square_subscription_id,
+        e.subscription_synced_at
       FROM employer_users eu
       INNER JOIN employers e ON e.id = eu.employer_id
       WHERE LOWER(eu.email) = ?
@@ -3669,7 +3913,10 @@ app.get('/api/employer-auth/reset-password/validate', rateLimitByIp(consumeReset
         e.onboarding_completed,
         e.subscription_status,
         e.access_status,
-        e.current_period_end
+        e.current_period_end,
+        e.square_customer_id,
+        e.square_subscription_id,
+        e.subscription_synced_at
       FROM employer_password_reset_tokens prt
       INNER JOIN employer_users eu ON eu.id = prt.employer_user_id
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -3760,7 +4007,10 @@ app.post('/api/employer-auth/reset-password', rateLimitByIp(consumeResetPassword
         e.onboarding_completed,
         e.subscription_status,
         e.access_status,
-        e.current_period_end
+        e.current_period_end,
+        e.square_customer_id,
+        e.square_subscription_id,
+        e.subscription_synced_at
       FROM employer_password_reset_tokens prt
       INNER JOIN employer_users eu ON eu.id = prt.employer_user_id
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -5344,6 +5594,7 @@ app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
         e.subscription_status,
         e.access_status,
         e.current_period_end,
+        e.subscription_synced_at,
         e.onboarding_completed,
         e.created_at,
         e.updated_at,
@@ -5399,6 +5650,7 @@ app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
       subscription_status: row.subscription_status,
       access_status: row.access_status,
       current_period_end: row.current_period_end,
+      subscription_synced_at: row.subscription_synced_at,
       onboarding_completed: !!row.onboarding_completed,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -5837,9 +6089,64 @@ async function runScrapeExclusive({ onlyIfStale, trigger }) {
   }
 }
 
+// Same hourly-check idea as the scraper: each employer whose last sync is over
+// SUBSCRIPTION_SYNC_MIN_AGE_HOURS old (or never) is synced, so the run is
+// daily per employer and a failed one retries next hour. onlyIfStale false
+// (admin button) syncs every Square-billed employer. Own named lock.
+let subscriptionSyncRunning = false
+
+async function runSubscriptionSyncExclusive({ onlyIfStale, trigger }) {
+  if (!isSquareSubscriptionSyncConfigured()) return { skipped: true }
+  if (subscriptionSyncRunning) return { busy: true }
+  subscriptionSyncRunning = true
+  let connection = null
+  try {
+    connection = await pool.getConnection()
+    const [lockRows] = await connection.query(`SELECT GET_LOCK('tarborojobs_subscription_sync', 0) AS got`)
+    if (Number(lockRows[0]?.got) !== 1) return { busy: true }
+
+    try {
+      const [employers] = await pool.query(
+        `
+        SELECT ${EMPLOYER_SUBSCRIPTION_COLUMNS}
+        FROM employers
+        WHERE (square_customer_id <> '' OR square_subscription_id <> '')
+          ${onlyIfStale ? `AND (subscription_synced_at IS NULL OR subscription_synced_at < NOW() - INTERVAL ${SUBSCRIPTION_SYNC_MIN_AGE_HOURS} HOUR)` : ''}
+        ORDER BY id
+        `
+      )
+      if (onlyIfStale && !employers.length) return { skipped: true }
+
+      const result = { checked: 0, updated: 0, errors: [] }
+      for (const employer of employers) {
+        result.checked += 1
+        try {
+          const outcome = await syncEmployerSubscription(employer)
+          if (outcome.updated) result.updated += 1
+          if (outcome.message) result.errors.push({ employerId: employer.id, message: outcome.message })
+        } catch (error) {
+          console.error(`[subscriptions] sync for employer ${employer.id} failed; access left as-is:`, error?.message || error)
+          result.errors.push({ employerId: employer.id, message: error?.message || String(error) })
+        }
+      }
+      console.log(`[subscriptions] sync finished (${trigger}): checked ${result.checked}, updated ${result.updated}, errors ${result.errors.length}`)
+      return result
+    } finally {
+      await connection.query(`SELECT RELEASE_LOCK('tarborojobs_subscription_sync')`).catch(() => {})
+    }
+  } finally {
+    connection?.release()
+    subscriptionSyncRunning = false
+  }
+}
+
 function scheduleScrapes() {
-  const check = () => runScrapeExclusive({ onlyIfStale: true, trigger: 'schedule' })
-    .catch((error) => console.error('[scraper] scheduled run failed:', error))
+  const check = () => Promise.all([
+    runScrapeExclusive({ onlyIfStale: true, trigger: 'schedule' })
+      .catch((error) => console.error('[scraper] scheduled run failed:', error)),
+    runSubscriptionSyncExclusive({ onlyIfStale: true, trigger: 'schedule' })
+      .catch((error) => console.error('[subscriptions] scheduled sync failed:', error)),
+  ])
   setTimeout(check, SCRAPE_FIRST_CHECK_MS)
   setInterval(check, SCRAPE_CHECK_EVERY_MS)
 }
@@ -5867,6 +6174,38 @@ app.get('/api/admin/diagnostics', requireAdminAuth, async (req, res) => {
   } catch (error) {
     console.error('GET /api/admin/diagnostics error:', error)
     res.status(500).json({ success: false, error: 'Failed to load diagnostics.' })
+  }
+})
+
+app.post('/api/admin/subscriptions/sync', requireAdminAuth, async (req, res) => {
+  try {
+    if (!isSquareSubscriptionSyncConfigured()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Square subscription sync is not configured. Set the Square access token and subscription plan ID first.',
+      })
+    }
+
+    const result = await runSubscriptionSyncExclusive({ onlyIfStale: false, trigger: 'admin' })
+    if (result.busy) {
+      return res.status(409).json({
+        success: false,
+        error: 'A subscription sync is already running. Try again in a minute.',
+      })
+    }
+
+    res.json({
+      success: true,
+      checked: result.checked,
+      updated: result.updated,
+      errors: result.errors,
+    })
+  } catch (error) {
+    console.error('POST /api/admin/subscriptions/sync error:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Failed to sync subscriptions.',
+    })
   }
 })
 
@@ -6528,6 +6867,7 @@ async function startServer() {
   await ensureResumeChecksTable()
   await ensureJobScraperColumns()
   await ensureEmployerUserAuthColumns()
+  await ensureEmployerSubscriptionSyncColumn()
   // The AI order tables only serve the AI routes; never let them stop the site.
   await ensureCoverLetterTable().catch((error) => console.error('STARTUP: cover letter table setup failed:', error?.message || error))
   await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))

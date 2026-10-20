@@ -303,6 +303,7 @@ export default function AdminDashboardPage({
   })
   const [inviteSubmitting, setInviteSubmitting] = useState(false)
   const [aiRefreshKey, setAiRefreshKey] = useState(0)
+  const [subscriptionSync, setSubscriptionSync] = useState({ running: false, notice: '', error: '' })
 
   const employerResults = useMemo(() => {
     const search = employerSearch.trim().toLowerCase()
@@ -343,6 +344,21 @@ export default function AdminDashboardPage({
         .some((value) => String(value).toLowerCase().includes(search))
     )
   }, [tokenSearch, tokens])
+
+  // Asks Square for every employer's real subscription state, then reloads.
+  async function handleSyncSubscriptions() {
+    setSubscriptionSync({ running: true, notice: '', error: '' })
+    try {
+      const result = await requestAdminJson('/admin/subscriptions/sync', { method: 'POST' })
+      const failed = result.errors?.length
+        ? ` ${result.errors.length} problem(s): ${result.errors.map((entry) => `#${entry.employerId} ${entry.message}`).join('; ')}`
+        : ''
+      setSubscriptionSync({ running: false, notice: `Checked ${result.checked}, updated ${result.updated}.${failed}`, error: '' })
+      await onRefresh?.()
+    } catch (err) {
+      setSubscriptionSync({ running: false, notice: '', error: err?.message || 'Could not sync subscriptions.' })
+    }
+  }
 
   async function handleCreateToken(event) {
     event.preventDefault()
@@ -556,15 +572,29 @@ export default function AdminDashboardPage({
       </div>
 
       <Card title="Employers">
-        <div className="flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
-          <Building2 className="h-4 w-4 shrink-0 text-slate-500" />
-          <input
-            className="w-full bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
-            placeholder="Search employers by business name, email, contact, city, or login"
-            value={employerSearch}
-            onChange={(event) => setEmployerSearch(event.target.value)}
-          />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex flex-1 items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3">
+            <Building2 className="h-4 w-4 shrink-0 text-slate-500" />
+            <input
+              className="w-full bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
+              placeholder="Search employers by business name, email, contact, city, or login"
+              value={employerSearch}
+              onChange={(event) => setEmployerSearch(event.target.value)}
+            />
+          </div>
+          <ActionButton type="button" onClick={handleSyncSubscriptions} disabled={subscriptionSync.running}>
+            <RefreshCw className={`h-4 w-4 ${subscriptionSync.running ? 'animate-spin' : ''}`} />
+            Sync subscriptions
+          </ActionButton>
         </div>
+
+        {subscriptionSync.error ? (
+          <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{subscriptionSync.error}</div>
+        ) : null}
+
+        {subscriptionSync.notice ? (
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{subscriptionSync.notice}</div>
+        ) : null}
 
         <div className="space-y-3">
           {employerResults.map((employer) => {
@@ -588,7 +618,9 @@ export default function AdminDashboardPage({
                       <div>Contact: {employer.contact_name || '—'}</div>
                       <div>Industry: {employer.industry || '—'}</div>
                       <div>City: {employer.city || '—'}</div>
+                      <div>Subscription: {employer.subscription_status || '—'}</div>
                       <div>Period ends: {formatDate(employer.current_period_end)}</div>
+                      <div>Last synced: {formatDateTime(employer.subscription_synced_at)}</div>
                     </div>
 
                     <div className="flex flex-wrap gap-2 text-xs text-slate-500">
