@@ -2,6 +2,7 @@
 // `compact` for the job detail page (alerts for jobs like the one shown).
 import { useMemo, useState } from 'react'
 import { Bell } from 'lucide-react'
+import { track } from '../lib/track'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -52,6 +53,7 @@ export default function JobAlertSignup({ jobs = [], keywords: searchKeywords = '
       const data = await response.json().catch(() => ({}))
       if (!response.ok || !data.success) throw new Error(data.error || 'Could not save your alert. Please try again.')
       setStatus('done')
+      track('alert_signup')
     } catch (submitError) {
       setError(submitError.message)
       setStatus('idle')

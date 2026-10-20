@@ -15,6 +15,7 @@ import { runAllScrapers } from './jobScraper.js'
 import { generateCoverLetter, generateInterviewPrep } from './aiService.js'
 import { registerAnalytics } from './analytics.js'
 import { register as registerJobAlerts } from './alerts.js'
+import { createSeo } from './seo.js'
 
 dotenv.config()
 
@@ -638,6 +639,41 @@ async function findPublicJobPostById(jobId) {
   )
 
   return rows.length ? rows[0] : null
+}
+
+// Every job the public can see, newest first (same visibility rules as above).
+async function listPublicJobPostRows() {
+  const [rows] = await pool.query(
+    `
+    SELECT
+      jp.id,
+      jp.job_title,
+      jp.job_description,
+      jp.city,
+      COALESCE(jp.industry, e.industry) AS industry,
+      jp.pay_min,
+      jp.pay_max,
+      jp.pay_type,
+      jp.employment_type,
+      jp.experience_level,
+      jp.status,
+      jp.created_at,
+      jp.published_at,
+      jp.updated_at,
+      jp.expires_at,
+      jp.source_url,
+      e.business_name,
+      e.industry AS employer_industry
+    FROM job_posts jp
+    INNER JOIN employers e ON e.id = jp.employer_id
+    WHERE jp.status = 'open'
+      AND (jp.expires_at IS NULL OR jp.expires_at > CURRENT_TIMESTAMP)
+      AND e.access_status = 'active'
+      AND e.onboarding_completed = 1
+    ORDER BY COALESCE(jp.published_at, jp.created_at) DESC
+    `
+  )
+  return rows
 }
 
 function createAuthToken(user) {
@@ -5438,35 +5474,7 @@ app.get('/api/employers', async (req, res) => {
 app.get('/api/jobposts', async (req, res) => {
   try {
     await expireOpenJobs()
-    const [rows] = await pool.query(
-      `
-      SELECT
-        jp.id,
-        jp.job_title,
-        jp.job_description,
-        jp.city,
-        COALESCE(jp.industry, e.industry) AS industry,
-        jp.pay_min,
-        jp.pay_max,
-        jp.pay_type,
-        jp.employment_type,
-        jp.experience_level,
-        jp.status,
-        jp.created_at,
-        jp.published_at,
-        jp.expires_at,
-        jp.source_url,
-        e.business_name,
-        e.industry AS employer_industry
-      FROM job_posts jp
-      INNER JOIN employers e ON e.id = jp.employer_id
-      WHERE jp.status = 'open'
-        AND (jp.expires_at IS NULL OR jp.expires_at > CURRENT_TIMESTAMP)
-        AND e.access_status = 'active'
-        AND e.onboarding_completed = 1
-      ORDER BY COALESCE(jp.published_at, jp.created_at) DESC
-      `
-    )
+    const rows = await listPublicJobPostRows()
 
     const jobs = rows.map((row) => ({
       id: row.id,
@@ -6843,13 +6851,18 @@ const jobAlerts = registerJobAlerts({
 })
 
 if (fs.existsSync(frontendIndexFile)) {
-  app.use(express.static(frontendDistDir))
-
-  app.get(/^\/(?!api(?:\/|$)|uploads(?:\/|$)).*/, (req, res, next) => {
-    res.sendFile(frontendIndexFile, (error) => {
-      if (error) next(error)
-    })
+  // HTML pages get a per-route <head> (title, canonical, JSON-LD); see seo.js.
+  const seo = createSeo({
+    indexFile: frontendIndexFile,
+    baseUrl: APP_BASE_URL,
+    findJob: findPublicJobPostById,
+    listJobs: listPublicJobPostRows,
+    formatPay: formatPayDisplay,
   })
+  app.get('/sitemap.xml', seo.sitemap)
+  app.use(express.static(frontendDistDir, { index: false }))
+
+  app.get(/^\/(?!api(?:\/|$)|uploads(?:\/|$)).*/, seo.page)
 } else {
   console.warn(`Frontend build not found at: ${frontendIndexFile}`)
 }

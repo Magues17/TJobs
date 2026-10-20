@@ -77,6 +77,8 @@ import AdminDashboardPage from './admin/AdminDashboardPage'
 import { track } from './lib/track'
 import JobAlertSignup from './alerts/JobAlertSignup'
 import AlertPage from './alerts/AlertPages'
+import LandingLinks from './LandingLinks'
+import { findLandingPage, landingJobs } from '../shared/landingPages.js'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -358,6 +360,9 @@ function getInitialRoute() {
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
   }
+  // Landing pages use their slug as the page key.
+  const landing = findLandingPage(pathname)
+  if (landing) return { page: landing.slug, jobId: null }
 
   return { page: 'jobs', jobId: null }
 }
@@ -368,6 +373,7 @@ function buildPublicPath(page, jobId = null) {
   if (legalPages.includes(page) || adminPages.includes(page)) return `/?page=${page}`
   if (page === 'employer-payment-success') return '/?page=employer-payment-success'
   if (aiToolPages.includes(page)) return `/?page=${page}`
+  if (findLandingPage(page)) return `/${page}`
   return '/'
 }
 
@@ -715,7 +721,7 @@ function formatExpiryDate(value) {
   return date.toLocaleDateString()
 }
 
-function JobsPage({ jobs, loading, onViewJob }) {
+function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
   const [type, setType] = useState('All Types')
@@ -745,8 +751,8 @@ function JobsPage({ jobs, loading, onViewJob }) {
   return (
     <div>
       <SectionHeader
-        title="Local Job Board"
-        subtitle="Click into each listing for the full job description, apply flow, and employer-specific application routing."
+        title={landing ? landing.h1 : 'Local Job Board'}
+        subtitle={landing ? landing.intro : 'Click into each listing for the full job description, apply flow, and employer-specific application routing.'}
       />
 
       <div className="mb-5 grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
@@ -782,6 +788,8 @@ function JobsPage({ jobs, loading, onViewJob }) {
           </div>
         </div>
       </div>
+
+      {!landing && <LandingLinks heading="Browse by" onNavigate={onBrowse} className="mb-5" />}
 
       <SearchRow
         placeholder="Search jobs, companies, or keywords"
@@ -904,6 +912,8 @@ function JobsPage({ jobs, loading, onViewJob }) {
           ))}
         </div>
       )}
+
+      {landing && <LandingLinks heading="More local job searches" currentSlug={landing.slug} onNavigate={onBrowse} />}
     </div>
   )
 }
@@ -977,6 +987,17 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
           )
         }
       />
+
+      {job.pay || job.type ? (
+        <div className="mb-5 flex flex-wrap items-center gap-2">
+          {job.pay ? (
+            <span className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-base font-semibold text-cyan-300">{job.pay}</span>
+          ) : null}
+          {job.type ? (
+            <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">{humanizeJobType(job.type)}</span>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
         <div className="space-y-5">
@@ -1900,7 +1921,7 @@ export default function TarboroJobsHomepage() {
   const [candidateActionError, setCandidateActionError] = useState('')
 
   function setBrowserLocation(page, jobId = null, options = {}) {
-    if (!['jobs', 'job-detail', 'job-apply', 'employer-payment-success', ...legalPages, ...adminPages, ...aiToolPages].includes(page)) return
+    if (!['jobs', 'job-detail', 'job-apply', 'employer-payment-success', ...legalPages, ...adminPages, ...aiToolPages].includes(page) && !findLandingPage(page)) return
 
     const nextPath = buildPublicPath(page, jobId)
     const currentPath = `${window.location.pathname}${window.location.search}`
@@ -1921,7 +1942,7 @@ export default function TarboroJobsHomepage() {
       return
     }
 
-    if (page === 'job-detail' || page === 'job-apply' || page === 'employer-payment-success' || legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page)) {
+    if (page === 'job-detail' || page === 'job-apply' || page === 'employer-payment-success' || legalPages.includes(page) || adminPages.includes(page) || aiToolPages.includes(page) || findLandingPage(page)) {
       setBrowserLocation(page, jobId, options)
     }
   }
@@ -2634,7 +2655,17 @@ export default function TarboroJobsHomepage() {
         </div>
       )}
       {currentPage === 'jobs' && (
-        <JobsPage jobs={jobs} loading={jobsLoading} onViewJob={(jobId) => navigateToPage('job-detail', jobId)} />
+        <JobsPage jobs={jobs} loading={jobsLoading} onViewJob={(jobId) => navigateToPage('job-detail', jobId)} onBrowse={(slug) => navigateToPage(slug)} />
+      )}
+      {findLandingPage(currentPage) && (
+        <JobsPage
+          key={currentPage}
+          jobs={landingJobs(findLandingPage(currentPage), jobs)}
+          loading={jobsLoading}
+          landing={findLandingPage(currentPage)}
+          onViewJob={(jobId) => navigateToPage('job-detail', jobId)}
+          onBrowse={(slug) => navigateToPage(slug)}
+        />
       )}
       {currentPage === 'job-detail' && (
         <JobDetailPage
