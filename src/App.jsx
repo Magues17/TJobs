@@ -84,6 +84,8 @@ const industries = [
   'Retail',
   'Construction',
   'Education',
+  'Government',
+  'Public Safety',
   'Food Service',
   'Information Technology',
   'Professional Services',

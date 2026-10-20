@@ -6042,7 +6042,7 @@ async function createSquareQuickPayLink({ name, priceCents, currency, note, redi
 // updated_at = NOW() on every row it sees, so MAX(updated_at) of scraped rows
 // is the last successful scrape. A MySQL named lock keeps two Passenger
 // processes from scraping at once; scrapeRunning covers this process.
-const SCRAPE_SOURCES = ['edgecombe_county', 'tarboro', 'usajobs']
+const SCRAPE_SOURCES = ['edgecombe_county', 'tarboro', 'usajobs', 'ecu_health', 'ecps', 'abb', 'pinetops']
 const SCRAPE_MIN_AGE_MS = 20 * 60 * 60 * 1000
 const SCRAPE_FIRST_CHECK_MS = 2 * 60 * 1000
 const SCRAPE_CHECK_EVERY_MS = 60 * 60 * 1000

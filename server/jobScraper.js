@@ -1,17 +1,101 @@
 // server/jobScraper.js
-// Scrapes Edgecombe County, Tarboro, and USAJOBS and upserts into job_posts.
+// Scrapes Edgecombe County, Tarboro, USAJOBS, ECU Health (Tarboro), Edgecombe County
+// Public Schools, ABB (Pinetops) and the Town of Pinetops, and upserts into job_posts.
 
+// Values must come from the site's filter list (src/App.jsx `industries`).
 const INDUSTRY_RULES = [
-  [/emt|paramedic|firefighter/i, 'Healthcare/Emergency'],
-  [/sheriff|deputy|police/i, 'Public Safety'],
-  [/social worker|caseworker/i, 'Social Services'],
+  [/\b(emt|aemt|paramedic|firefighter|fire fighter|sheriff|deputy|police|detention|telecommunicator|911)\b/i, 'Public Safety'],
+  [/\b(nurse|rn|lpn|cna|medical|health|pharmac|therap)/i, 'Healthcare'],
 ]
 
-function mapIndustry(title) {
+function mapIndustry(title, fallback = 'Government') {
   for (const [re, industry] of INDUSTRY_RULES) {
     if (re.test(title)) return industry
   }
-  return 'Government/Public Sector'
+  return fallback
+}
+
+const USER_AGENT = 'TarboroJobs/1.0 (+https://tarborojobs.com)'
+
+async function fetchOk(url, opts = {}) {
+  const res = await fetch(url, {
+    ...opts,
+    headers: { 'User-Agent': USER_AGENT, ...opts.headers },
+    signal: AbortSignal.timeout(30000),
+  })
+  if (!res.ok) throw new Error(`${new URL(url).host} fetch failed: ${res.status}`)
+  return res
+}
+
+// Rich-text HTML (ATS job descriptions) to plain text that keeps paragraphs and bullets.
+function htmlToText(html) {
+  return decodeEntities(html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, '')
+    .replace(/<li[^>]*>/gi, '\n• ')
+    .replace(/<br\s*\/?>|<\/(p|div|h\d|ul|ol|tr|li)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' '))
+    .split('\n')
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, 8000) || null
+}
+
+// Conservative pay extraction: one clear rate or range with a stated unit, an
+// unmistakably annual figure, or a small figure labelled as pay. Bonuses, benefits and
+// "up to" amounts are ignored. The same pay stated hourly and annually keeps the first;
+// two different rates of one kind (several roles, tiers) → null.
+const PAY_UNITS = [
+  [/^(hour|hr|hourly)/i, 'hourly'],
+  [/^(year|yr|annual|annually)/i, 'salary'],
+  [/^(month|monthly|mo)\b/i, 'monthly'],
+  [/^(week|weekly|wk)/i, 'weekly'],
+  [/^(day|daily)/i, 'daily'],
+]
+const PAY_LIMITS = { hourly: [7.25, 250], salary: [15000, 500000], monthly: [1200, 40000], weekly: [290, 10000], daily: [58, 2000] }
+
+function parsePay(text) {
+  if (!text) return null
+  const amount = dollar => String.raw`${dollar}\s?(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?(?![\d,]*\s*[kKmM]\b)`
+  const re = new RegExp(`${amount('\\$')}(?:\\s*(?:-|–|—|to)\\s*${amount('\\$?')})?[\\s(]*(?:(?:\\/|per|an|a)\\s*)?([a-z]+)?`, 'gi')
+  const found = []
+  for (const m of text.matchAll(re)) {
+    // Context = the same sentence/bullet, up to 40 chars back
+    const before = text.slice(Math.max(0, m.index - 40), m.index).split(/[\n•;]|\.\s/).pop()
+    if (/bonus|incentive|sign[\s-]?on|reimburs|tuition|allowance|stipend|fee|benefit|revenue|up to\s*$/i.test(before)) continue
+    const num = (int, dec) => int ? parseFloat(int.replace(/,/g, '') + (dec ?? '')) : null
+    const min = num(m[1], m[2])
+    const max = num(m[3], m[4])
+    let pay_type = PAY_UNITS.find(([u]) => u.test(m[5] ?? ''))?.[1]
+    if (!pay_type && min >= 20000) pay_type = 'salary' // "$45,000 - $52,000" with no unit
+    if (!pay_type && (max ?? min) < 250 && /pay|wage|rate/i.test(before)) pay_type = 'hourly' // "Pay Range $16.00 - $19.90"
+    if (!pay_type) continue
+    const [lo, hi] = PAY_LIMITS[pay_type]
+    if (min < lo || (max ?? min) > hi || (max ?? min) < min) continue
+    // "begins at $38,600" is a floor, not a range
+    const pay_max = max ?? (/start|begin|entry|minimum|from\s*$/i.test(before) ? null : min)
+    found.push({ pay_min: min, pay_max, pay_type })
+  }
+  const distinct = [...new Map(found.map(p => [`${p.pay_min}|${p.pay_max}|${p.pay_type}`, p])).values()]
+  const types = new Set(distinct.map(p => p.pay_type))
+  return distinct.length && types.size === distinct.length ? distinct[0] : null
+}
+
+// Run with `node server/jobScraper.js --self-test`.
+if (process.argv[1]?.endsWith('jobScraper.js') && process.argv.includes('--self-test')) {
+  const { deepStrictEqual: eq } = await import('node:assert')
+  eq(parsePay('Pay: $16.50/hr'), { pay_min: 16.5, pay_max: 16.5, pay_type: 'hourly' })
+  eq(parsePay('Salary range $45,000 - $52,000 annually'), { pay_min: 45000, pay_max: 52000, pay_type: 'salary' })
+  eq(parsePay('The salary range is $35,100-$52,700 with excellent benefits that total over $11,000 annually'), { pay_min: 35100, pay_max: 52700, pay_type: 'salary' })
+  eq(parsePay('Salary: $20.41 – $33.68/hr (Annual Expected Salary $42,453 - $80,563)'), { pay_min: 20.41, pay_max: 33.68, pay_type: 'hourly' })
+  eq(parsePay('• EMT: $16.50/hr\n• AEMT: $17.75/hr\n• Paramedic: $20.41/hr'), null)
+  eq(parsePay('Pay Range for Staff Nurse II: $34.00-46.75'), { pay_min: 34, pay_max: 46.75, pay_type: 'hourly' })
+  eq(parsePay('$7500 Sign-On Bonus. Starting salary begins at $38,600'), { pay_min: 38600, pay_max: null, pay_type: 'salary' })
+  eq(parsePay('$30K Commitment Bonus; base pay up to $63 per hour'), null)
+  eq(parsePay('$26.75 - $35.99 (hourly)'), { pay_min: 26.75, pay_max: 35.99, pay_type: 'hourly' })
+  eq(parsePay('Salary: $145 per day licensed\n$120 per day non-licensed'), null)
+  console.log('jobScraper self-test ok')
 }
 
 // Title wins over description; within the description the earliest mention wins.
@@ -19,7 +103,7 @@ function mapIndustry(title) {
 function inferEmploymentType(title, text = '') {
   const rules = [
     [/part[\s-]?time|\(pt\)/i, 'part-time'],
-    [/temporary|seasonal|intermittent/i, 'temporary'],
+    [/temporary|seasonal|intermittent|\btemp\b/i, 'temporary'],
     [/full[\s-]?time/i, 'full-time'],
   ]
   for (const [re, type] of rules) if (re.test(title)) return type
@@ -32,7 +116,10 @@ function inferEmploymentType(title, text = '') {
   return best?.type ?? 'full-time'
 }
 
-const NAMED_ENTITIES = { nbsp: ' ', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
+const NAMED_ENTITIES = {
+  nbsp: ' ', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>',
+  rsquo: "'", lsquo: "'", rdquo: '"', ldquo: '"', ndash: '–', mdash: '—', hellip: '…', bull: '•',
+}
 
 function decodeEntities(s) {
   return s.replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi, (m, dec, hex, name) => {
@@ -48,8 +135,7 @@ function stripTags(html) {
 
 async function fetchPdfText(url) {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(30000) })
-    if (!res.ok) return null
+    const res = await fetchOk(url)
     const mod = await import('pdf-parse')
     const pdfParse = mod.default || mod
     const { text } = await pdfParse(Buffer.from(await res.arrayBuffer()))
@@ -80,6 +166,7 @@ async function addPdfDescriptions(jobs) {
   for (const job of jobs) {
     if (job.source_url.split('?')[0].toLowerCase().endsWith('.pdf')) {
       job.job_description = await fetchPdfText(job.source_url)
+      Object.assign(job, parsePay(job.job_description))
     }
     job.employment_type = inferEmploymentType(job.job_title, job.job_description ?? '')
   }
@@ -89,17 +176,18 @@ async function addPdfDescriptions(jobs) {
 // ── Edgecombe County ──────────────────────────────────────────────────────────
 
 export async function scrapeEdgecombeCounty() {
-  const res = await fetch('https://www.edgecombecountync.gov/departments/human_resources/job_openings.php', { signal: AbortSignal.timeout(30000) })
-  if (!res.ok) throw new Error(`Edgecombe fetch failed: ${res.status}`)
+  const res = await fetchOk('https://www.edgecombecountync.gov/departments/human_resources/job_openings.php')
   const html = await res.text()
 
-  const listMatch = html.match(/<ul class="file-group">([\s\S]*?)<!--\/\.file-group-->/i)
-  if (!listMatch) throw new Error('Edgecombe jobs list not found; page layout may have changed')
+  // One file-group per department (Emergency Services, Finance, Health, Sheriff, DSS, ...).
+  const groups = [...html.matchAll(/<ul class="file-group">([\s\S]*?)<!--\/\.file-group-->/gi)].map(m => m[1])
+  if (!groups.length) throw new Error('Edgecombe jobs list not found; page layout may have changed')
 
   const jobs = []
   const liRe = /<li[^>]*>([\s\S]*?)<\/li>/gi
+  const lists = groups.join('\n')
   let liMatch
-  while ((liMatch = liRe.exec(listMatch[1])) !== null) {
+  while ((liMatch = liRe.exec(lists)) !== null) {
     const block = liMatch[1]
 
     const aMatch = block.match(/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
@@ -142,8 +230,7 @@ export async function scrapeEdgecombeCounty() {
 // ── Tarboro ───────────────────────────────────────────────────────────────────
 
 export async function scrapeTarboro() {
-  const res = await fetch('https://www.tarboro-nc.com/departments/human_resources.php', { signal: AbortSignal.timeout(30000) })
-  if (!res.ok) throw new Error(`Tarboro fetch failed: ${res.status}`)
+  const res = await fetchOk('https://www.tarboro-nc.com/departments/human_resources.php')
   const html = await res.text()
 
   // Isolate the jobs table body
@@ -262,6 +349,154 @@ function milesFromTarboro({ Latitude, Longitude }) {
 
 const USAJOBS_PAY_TYPES = { PA: 'salary', PH: 'hourly', PD: 'daily', PW: 'weekly', PM: 'monthly' }
 
+// ── Phenom career sites (ECU Health, ABB) ─────────────────────────────────────
+// The search page loads its results from POST /widgets (robots.txt only blocks
+// /px-widgets); each job page embeds the full posting in `phApp.ddo`.
+
+async function scrapePhenom({ host, lang, country, path, city, source, company, industry }) {
+  const res = await fetchOk(`https://${host}/widgets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      lang, country, deviceType: 'desktop', pageName: 'search-results', ddoKey: 'refineSearch',
+      from: 0, size: 50, jobs: true, counts: false, all_fields: ['city'], clearAll: false,
+      jdsource: 'facets', pageId: 'page20', siteType: 'external', keywords: '', global: true,
+      selected_fields: { city: [city] }, locationData: {},
+    }),
+  })
+  const search = (await res.json())?.refineSearch
+  const list = search?.data?.jobs
+  if (search?.status !== 200 || !Array.isArray(list)) throw new Error(`${source}: search response not understood`)
+  if (!list.length) throw new Error(`${source}: no ${city} jobs returned; the city filter may have changed`)
+
+  const jobs = []
+  for (const j of list) {
+    // Strict: the posting itself must name the town (multi-site postings included).
+    if (!j.jobId || !j.title || !(j.multi_location ?? [j.location]).some(l => String(l).startsWith(`${city},`))) continue
+    const source_url = `https://${host}${path}/job/${encodeURIComponent(j.jobId)}`
+    let job_description = null
+    try {
+      const page = await (await fetchOk(source_url)).text()
+      const ddo = JSON.parse(page.match(/phApp\.ddo = (\{[\s\S]*?\});\s*phApp\./)?.[1] ?? 'null')
+      job_description = htmlToText(ddo?.jobDetail?.data?.job?.description ?? '')
+    } catch { /* keep the listing; upsertJob writes a short fallback description */ }
+    jobs.push({
+      job_title: j.title,
+      company: typeof company === 'function' ? company(j) : company,
+      city,
+      industry: mapIndustry(j.title, industry),
+      employment_type: inferEmploymentType(`${j.title} ${j.hiringType ?? ''} ${j.type ?? ''}`, job_description ?? ''),
+      source,
+      external_id: String(j.jobId).slice(0, 191),
+      source_url,
+      job_description: job_description ?? j.descriptionTeaser ?? null,
+      expires_at: null,
+      ...parsePay(job_description),
+    })
+  }
+  jobs.partial = search.totalHits > list.length
+  return jobs
+}
+
+export function scrapeEcuHealth() {
+  return scrapePhenom({
+    host: 'careers.ecuhealth.org', lang: 'en_us', country: 'us', path: '/us/en',
+    city: 'Tarboro', source: 'ecu_health', industry: 'Healthcare',
+    company: j => /edgecombe/i.test(j.facility ?? '') ? 'ECU Health Edgecombe Hospital' : 'ECU Health',
+  })
+}
+
+export function scrapeAbbPinetops() {
+  return scrapePhenom({
+    host: 'careers.abb', lang: 'en_global', country: 'global', path: '/global/en',
+    city: 'Pinetops', source: 'abb', industry: 'Manufacturing', company: 'ABB',
+  })
+}
+
+// ── Edgecombe County Public Schools (SchoolSpring) ────────────────────────────
+// ecps.us "apply" links go to edgecombe.schoolspring.com, a React app backed by this
+// public JSON API. Every listing is an ECPS school, so all are in Edgecombe County.
+
+const ECPS_TOWNS = /^(Tarboro|Princeville|Pinetops|Speed|Conetoe|Macclesfield|Leggett|Battleboro|Rocky Mount), North Carolina$/
+const SS_API = 'https://api.schoolspring.com/api/Jobs'
+const SS_DOMAIN = 'domainName=edgecombe.schoolspring.com'
+
+export async function scrapeEcps() {
+  const size = 100
+  const res = await fetchOk(`${SS_API}/GetPagedJobsWithSearch?${SS_DOMAIN}&keyword=&location=&category=&gradelevel=&jobtype=&organization=&swLat=&swLon=&neLat=&neLon=&page=1&size=${size}&sortDateAscending=false`)
+  const data = await res.json()
+  const list = data?.value?.jobsList
+  if (!data?.success || !Array.isArray(list)) throw new Error('ecps: job list response not understood')
+  if (!list.length) throw new Error('ecps: no jobs returned; the API may have changed')
+
+  const jobs = []
+  for (const item of list) {
+    const city = ECPS_TOWNS.exec(item.location ?? '')?.[1]
+    if (!city || !item.jobId) continue
+    let info = null
+    if (jobs.length < 58) { // stay under 60 requests per run
+      try {
+        info = (await (await fetchOk(`${SS_API}/${item.jobId}?${SS_DOMAIN}`)).json())?.value?.jobInfo ?? null
+      } catch { /* keep the listing without details */ }
+    }
+    const job_title = decodeEntities(item.title ?? '').trim()
+    if (!job_title) continue
+    const school = decodeEntities(item.employer ?? '')
+    const body = info?.jobDescription ? htmlToText(info.jobDescription) : null
+    const job_description = body && !/^(TBD|Multiple Locations|Edgecombe County Public Schools)$/i.test(school)
+      ? `Location: ${school}\n\n${body}`.slice(0, 8000)
+      : body
+    const close = info?.closeDate?.slice(0, 10)
+    const ssPayType = PAY_UNITS.find(([u]) => u.test((info?.payTypeName ?? '').replace(/^per\s+/i, '')))?.[1]
+    const statedPay = info?.payMin > 0 && ssPayType
+      ? { pay_min: info.payMin, pay_max: info.payMax > 0 ? info.payMax : info.payMin, pay_type: ssPayType }
+      : parsePay(body)
+    jobs.push({
+      job_title,
+      company: 'Edgecombe County Public Schools',
+      city,
+      industry: mapIndustry(job_title, 'Education'),
+      employment_type: inferEmploymentType(`${job_title} ${info?.jobTypeName ?? ''} ${info?.shiftType ?? ''}`, body ?? ''),
+      source: 'ecps',
+      external_id: String(item.jobId),
+      source_url: `https://edgecombe.schoolspring.com/?jobid=${item.jobId}`,
+      job_description,
+      expires_at: close && close < '2049' ? close : null, // 2050-01-01 means "until filled"
+      ...statedPay,
+    })
+  }
+  jobs.partial = list.length >= size
+  return jobs
+}
+
+// ── Town of Pinetops ──────────────────────────────────────────────────────────
+// Openings appear as "Job Description <title>" PDFs under Related Documents.
+
+export async function scrapePinetops() {
+  const base = 'https://townofpinetopsnc.com/'
+  const html = await (await fetchOk(`${base}employment-opportunities`)).text()
+  if (!/To apply for any position at the Town of Pinetops/i.test(html)) {
+    throw new Error('Pinetops employment page not recognised; page layout may have changed')
+  }
+  const jobs = []
+  for (const m of html.matchAll(/<a\s[^>]*href="([^"]+\.pdf)"[^>]*title="Job Description\s+([^"]+)"/gi)) {
+    const job_title = decodeEntities(m[2]).trim()
+    const path = m[1]
+    jobs.push({
+      job_title,
+      company: 'Town of Pinetops',
+      city: 'Pinetops',
+      industry: mapIndustry(job_title),
+      source: 'pinetops',
+      external_id: path.replace(/^.*\//, '').slice(-191),
+      source_url: new URL(path, base).href,
+      job_description: null,
+      expires_at: null,
+    })
+  }
+  return addPdfDescriptions(jobs)
+}
+
 // ── Upsert helper ─────────────────────────────────────────────────────────────
 
 const UPSERT_SQL = `
@@ -335,6 +570,10 @@ export async function runAllScrapers(pool) {
     { name: 'edgecombe_county', fn: scrapeEdgecombeCounty },
     { name: 'tarboro', fn: scrapeTarboro },
     { name: 'usajobs', fn: fetchUSAJOBS },
+    { name: 'ecu_health', fn: scrapeEcuHealth },
+    { name: 'ecps', fn: scrapeEcps },
+    { name: 'abb', fn: scrapeAbbPinetops },
+    { name: 'pinetops', fn: scrapePinetops },
   ]
 
   let imported = 0
