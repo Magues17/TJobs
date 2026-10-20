@@ -16,6 +16,7 @@
 // and easy to remove or extract later.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { track } from '../lib/track'
 import {
   FileText,
   Upload,
@@ -188,6 +189,7 @@ function ResumeUploadForm({ onUploadReady }) {
     if (jobDescription) formData.append('jobDescription', jobDescription)
     formData.append('consent', 'true')
 
+    track('tool_start', { product: 'resume_check' })
     try {
       setSubmitting(true)
       const response = await fetch(`${API_BASE}/resume-checker/preview`, {
@@ -603,6 +605,7 @@ export default function ResumeCheckerPage({ initialMode = 'upload', onBack }) {
         return
       }
       if (data.checkoutUrl) {
+        track('checkout_start', { product: 'resume_check' })
         window.location.href = data.checkoutUrl
         return
       }

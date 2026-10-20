@@ -74,6 +74,7 @@ import EmployerResetPasswordPage from './employer/EmployerResetPasswordPage'
 import CandidateActionPanel from './employer/CandidateActionPanel'
 import AdminLoginPage from './admin/AdminLoginPage'
 import AdminDashboardPage from './admin/AdminDashboardPage'
+import { track } from './lib/track'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -110,6 +111,7 @@ const privacyPolicySections = [
     body: [
       'TarboroJobs may collect information you submit directly to us, including employer account details, business profile details, job posting content, applicant contact details, resume files, resume text, messages, and other information you choose to provide through the site.',
       'We may also collect technical and usage information such as device, browser, IP-address level information, pages visited, referring URLs, and other basic analytics or log data needed to operate, secure, and improve the service.',
+      'We measure site usage with our own anonymous, first-party statistics: pages viewed, the type of device, where a visit came from, and whether a visitor applied or used a tool. This uses a random ID kept in your browser storage, not cookies, and the statistics do not include your IP address or any personal details. We use no third-party analytics or advertising trackers, and we do not record any statistics if your browser sends a Do Not Track or Global Privacy Control signal.',
     ],
   },
   {
@@ -948,6 +950,7 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
               href={job.source_url}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => track('outbound_apply_click', { job_id: job.id })}
               className="block w-full rounded-2xl bg-cyan-400 px-5 py-3 text-center text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
             >
               Apply on official site
@@ -1015,6 +1018,7 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
                   href={job.source_url}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => track('outbound_apply_click', { job_id: job.id })}
                   className="block w-full rounded-2xl bg-cyan-400 px-5 py-3 text-center text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
                 >
                   View official posting
@@ -1249,6 +1253,7 @@ function SubmitResumePage({ job, loading, error, onBack }) {
         throw new Error(data.error || 'Failed to submit application.')
       }
 
+      track('apply_submit', { job_id: job.id })
       setMessage(`Your application for ${job.title} has been submitted successfully.`)
       setForm({
         full_name: '',
@@ -1290,6 +1295,7 @@ function SubmitResumePage({ job, loading, error, onBack }) {
               href={job.source_url}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => track('outbound_apply_click', { job_id: job.id })}
               className="inline-block rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
             >
               View official posting
@@ -1672,6 +1678,7 @@ function ListBusinessPage() {
         throw new Error(data.error || 'Unable to start secure employer checkout.')
       }
 
+      track('checkout_start', { product: 'employer_plan' })
       window.location.assign(data.checkout_url)
     } catch (err) {
       setError(err.message || 'Unable to start secure employer checkout.')
@@ -2552,6 +2559,19 @@ export default function TarboroJobsHomepage() {
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
+
+  // Anonymous first-party usage events (see src/lib/track.js).
+  useEffect(() => {
+    track('page_view', { path: selectedPublicJobId && currentPage.startsWith('job-') ? buildPublicPath(currentPage, selectedPublicJobId) : currentPage === 'jobs' ? '/' : `/${currentPage}` })
+  }, [currentPage, selectedPublicJobId])
+
+  useEffect(() => {
+    if (currentPage === 'job-detail' && publicJobDetail?.id) track('job_view', { job_id: publicJobDetail.id })
+  }, [currentPage, publicJobDetail?.id])
+
+  useEffect(() => {
+    if (currentPage === 'job-apply' && selectedPublicJobId) track('apply_start', { job_id: selectedPublicJobId })
+  }, [currentPage, selectedPublicJobId])
 
   useEffect(() => {
     if (!selectedPublicJobId || !['job-detail', 'job-apply'].includes(currentPage)) {
