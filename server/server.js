@@ -15,6 +15,7 @@ import { runAllScrapers } from './jobScraper.js'
 import { generateCoverLetter, generateInterviewPrep } from './aiService.js'
 import { registerAnalytics } from './analytics.js'
 import { register as registerJobAlerts } from './alerts.js'
+import { register as registerFacebook } from './facebook.js'
 import { createSeo } from './seo.js'
 
 dotenv.config()
@@ -6159,6 +6160,7 @@ function scheduleScrapes() {
     analytics.purgeOldEvents().catch((error) => console.error('[analytics] purge failed:', error?.message || error)),
     jobAlerts.runDigests({ trigger: 'schedule' })
       .catch((error) => console.error('[alerts] scheduled digest run failed:', error)),
+    facebook.postNewJobs(),
   ])
   setTimeout(check, SCRAPE_FIRST_CHECK_MS)
   setInterval(check, SCRAPE_CHECK_EVERY_MS)
@@ -6850,6 +6852,9 @@ const jobAlerts = registerJobAlerts({
   ipHashSecret: JWT_SECRET,
 })
 
+// Facebook Page auto-post: inert unless FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN are set.
+const facebook = registerFacebook({ app, pool, requireAdminAuth, formatPay: formatPayDisplay, APP_BASE_URL })
+
 if (fs.existsSync(frontendIndexFile)) {
   // HTML pages get a per-route <head> (title, canonical, JSON-LD); see seo.js.
   const seo = createSeo({
@@ -6916,6 +6921,7 @@ async function startServer() {
   await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))
   await analytics.ensureTable().catch((error) => console.error('STARTUP: analytics table setup failed:', error?.message || error))
   await jobAlerts.ensureTables().catch((error) => console.error('STARTUP: job alert tables setup failed:', error?.message || error))
+  await facebook.ensureTable().catch((error) => console.error('STARTUP: facebook table setup failed:', error?.message || error))
   await expireOpenJobs()
 
   app.listen(PORT, () => {

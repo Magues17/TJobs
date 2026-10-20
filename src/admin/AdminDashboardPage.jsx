@@ -294,6 +294,43 @@ function BarList({ rows, empty = 'Nothing yet.' }) {
   )
 }
 
+// Read-only Facebook auto-post status from /api/admin/facebook (no secrets).
+function FacebookPanel({ Card, refreshKey }) {
+  const [info, setInfo] = useState(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(() => {
+    requestAdminJson('/admin/facebook')
+      .then((data) => { setInfo(data); setError('') })
+      .catch((err) => setError(err?.message || 'Could not load Facebook status.'))
+  }, [])
+  useEffect(() => { load() }, [load, refreshKey])
+  const run = async () => {
+    setBusy(true)
+    try { await requestAdminJson('/admin/facebook/run', { method: 'POST' }); load() }
+    catch (err) { setError(err?.message || 'Run failed.') }
+    finally { setBusy(false) }
+  }
+  return (
+    <Card title="Facebook auto-post">
+      {error ? <p className="text-sm text-rose-300">{error}</p> : null}
+      {info ? (
+        <div className="space-y-1 text-sm text-slate-300">
+          <p>Status: {info.enabled ? 'On' : 'Off'} (page ID {info.pageIdSet ? 'set' : 'missing'}, token {info.tokenSet ? 'set' : 'missing'})</p>
+          <p>Posted in the last 7 days: {info.postedLast7Days}</p>
+          {info.pausedUntil ? <p className="text-amber-300">Paused until {info.pausedUntil}</p> : null}
+          {info.lastError ? <p className="text-rose-300">Last error: {info.lastError.message}</p> : null}
+          {info.enabled ? (
+            <button type="button" disabled={busy} onClick={run} className="mt-2 rounded-full bg-slate-800 px-3 py-1 font-semibold text-slate-200">
+              {busy ? 'Running...' : 'Run now'}
+            </button>
+          ) : null}
+        </div>
+      ) : !error ? <p className="text-sm text-slate-500">Loading...</p> : null}
+    </Card>
+  )
+}
+
 // Anonymous first-party usage stats from /api/admin/analytics.
 function AnalyticsPanel({ Card, refreshKey }) {
   const [days, setDays] = useState(30)
@@ -584,6 +621,8 @@ export default function AdminDashboardPage({
       </div>
 
       <AnalyticsPanel Card={Card} refreshKey={aiRefreshKey} />
+
+      <FacebookPanel Card={Card} refreshKey={aiRefreshKey} />
 
       <AiProductsPanel Card={Card} refreshKey={aiRefreshKey} />
 
