@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { getStoredAdminApiKey } from './auth'
 import { getStoredEmployerToken } from '../employer/auth'
+import AdminFeaturedPanel from '../featured/AdminFeaturedPanel'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -662,6 +663,7 @@ export default function AdminDashboardPage({
       <AiProductsPanel Card={Card} refreshKey={aiRefreshKey} />
 
       <KitOrdersPanel Card={Card} refreshKey={aiRefreshKey} />
+      <AdminFeaturedPanel Card={Card} refreshKey={aiRefreshKey} />
 
       <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
         <Card title="Create employer onboarding link">

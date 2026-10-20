@@ -18,6 +18,7 @@ import { registerBundles } from './bundles.js'
 import { register as registerJobAlerts } from './alerts.js'
 import { register as registerFacebook } from './facebook.js'
 import { createSeo } from './seo.js'
+import { register as registerFeatured, orderFeaturedFirst, isFeatured } from './featured.js'
 
 dotenv.config()
 
@@ -626,6 +627,8 @@ async function findPublicJobPostById(jobId) {
       jp.published_at,
       jp.expires_at,
       jp.source_url,
+      jp.featured_until,
+      (jp.featured_until IS NOT NULL AND jp.featured_until > CURRENT_TIMESTAMP) AS is_featured,
       e.business_name,
       e.industry AS employer_industry
     FROM job_posts jp
@@ -643,7 +646,8 @@ async function findPublicJobPostById(jobId) {
   return rows.length ? rows[0] : null
 }
 
-// Every job the public can see, newest first (same visibility rules as above).
+// Every job the public can see, featured first then newest (same visibility
+// rules as above); see orderFeaturedFirst in featured.js.
 async function listPublicJobPostRows() {
   const [rows] = await pool.query(
     `
@@ -664,6 +668,8 @@ async function listPublicJobPostRows() {
       jp.updated_at,
       jp.expires_at,
       jp.source_url,
+      jp.featured_until,
+      (jp.featured_until IS NOT NULL AND jp.featured_until > CURRENT_TIMESTAMP) AS is_featured,
       e.business_name,
       e.industry AS employer_industry
     FROM job_posts jp
@@ -675,7 +681,7 @@ async function listPublicJobPostRows() {
     ORDER BY COALESCE(jp.published_at, jp.created_at) DESC
     `
   )
-  return rows
+  return orderFeaturedFirst(rows)
 }
 
 function createAuthToken(user) {
@@ -2219,7 +2225,8 @@ async function findJobOwnedByEmployer(jobId, employerId) {
       expires_at,
       expired_at,
       posting_guidelines_accepted,
-      posting_guidelines_accepted_at
+      posting_guidelines_accepted_at,
+      source_url
     FROM job_posts
     WHERE id = ?
     LIMIT 1
@@ -2229,6 +2236,9 @@ async function findJobOwnedByEmployer(jobId, employerId) {
 
   if (!rows.length) return null
   if (Number(rows[0].employer_id) !== Number(employerId)) return false
+  // Scraped jobs (claimed employers) are rewritten by the nightly scraper, so
+  // their owner may feature them but never edit, close or delete them.
+  if (rows[0].source_url) return false
   return rows[0]
 }
 
@@ -2376,6 +2386,8 @@ app.get('/api/jobposts/:id', async (req, res) => {
         status: row.status,
         posted: row.published_at || row.created_at,
         expires_at: row.expires_at,
+        featured: isFeatured(row),
+        claimable: await featured.isClaimable(row),
       },
     })
   } catch (error) {
@@ -2739,6 +2751,11 @@ app.post('/api/square/webhook', async (req, res) => {
     const aiProductType = await tryHandleAiProductPayment(payment)
     if (aiProductType) {
       return res.status(200).json({ success: true, type: aiProductType })
+    }
+
+    // Featured listing payments (note "featured:<token>"); see featured.js.
+    if (await featured.tryHandlePayment(payment)) {
+      return res.status(200).json({ success: true, type: 'featured' })
     }
 
     // A full refund of any employer payment (first or renewal) re-reads the
@@ -4215,6 +4232,9 @@ app.patch('/api/employer/account', requireEmployerAuth, async (req, res) => {
       })
     }
 
+    // A claimed scraped employer keeps its listings+<slug>@tarborojobs.com
+    // address: the scraper finds the employer by it, and a new address would
+    // move every scraped job to a fresh employer on the next run.
     await pool.query(
       `
       UPDATE employers
@@ -4222,7 +4242,7 @@ app.patch('/api/employer/account', requireEmployerAuth, async (req, res) => {
         business_name = ?,
         industry = ?,
         contact_name = ?,
-        email = ?,
+        email = IF(email LIKE 'listings+%@tarborojobs.com', email, ?),
         phone = ?,
         website = ?,
         address = ?,
@@ -4405,7 +4425,10 @@ app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asyn
         expired_at,
         posting_guidelines_accepted,
         posting_guidelines_accepted_at,
-        updated_at
+        updated_at,
+        source_url,
+        featured_until,
+        (featured_until IS NOT NULL AND featured_until > CURRENT_TIMESTAMP) AS is_featured
       FROM job_posts
       WHERE employer_id = ?
       ORDER BY COALESCE(published_at, created_at) DESC
@@ -5498,6 +5521,7 @@ app.get('/api/jobposts', async (req, res) => {
       status: row.status,
       posted: row.published_at || row.created_at,
       expires_at: row.expires_at,
+      featured: isFeatured(row),
     }))
 
     res.json({
@@ -6915,6 +6939,26 @@ const bundles = registerBundles({
   },
 })
 
+// Featured listings and claim-this-listing: routes, webhook handler, tables.
+const featured = registerFeatured({
+  app,
+  pool,
+  requireEmployerAuth,
+  requireEligibleEmployer,
+  requireAdminAuth,
+  createIpRateLimiter,
+  rateLimitByIp,
+  createSquareQuickPayLink,
+  tableColumnExists,
+  getMailer,
+  getMailFrom,
+  escapeHtml,
+  adminEmails: ADMIN_EMAILS,
+  buildPasswordResetUrl: buildEmployerPasswordResetUrl,
+  sha256,
+  APP_BASE_URL,
+})
+
 if (fs.existsSync(frontendIndexFile)) {
   // HTML pages get a per-route <head> (title, canonical, JSON-LD); see seo.js.
   const seo = createSeo({
@@ -6976,6 +7020,8 @@ async function startServer() {
   await ensureJobScraperColumns()
   await ensureEmployerUserAuthColumns()
   await ensureEmployerSubscriptionSyncColumn()
+  // Required: the public job queries select job_posts.featured_until.
+  await featured.ensureTables()
   // The AI order tables only serve the AI routes; never let them stop the site.
   await ensureCoverLetterTable().catch((error) => console.error('STARTUP: cover letter table setup failed:', error?.message || error))
   await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))

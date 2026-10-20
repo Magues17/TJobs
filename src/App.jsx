@@ -80,6 +80,8 @@ import JobAlertSignup from './alerts/JobAlertSignup'
 import AlertPage from './alerts/AlertPages'
 import LandingLinks from './LandingLinks'
 import { findLandingPage, landingJobs } from '../shared/landingPages.js'
+import FeaturedBadge from './featured/FeaturedBadge'
+import ClaimListing from './featured/ClaimListing'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -842,6 +844,7 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
             >
               <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div className="min-w-0">
+                  <FeaturedBadge job={job} className="mb-2 mr-2" />
                   <div className="mb-2 inline-flex rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-[11px] font-medium text-slate-300">
                     {job.industry || 'Local employer'}
                   </div>
@@ -989,6 +992,8 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
         }
       />
 
+      <FeaturedBadge job={job} className="mb-4" />
+
       {job.pay || job.type ? (
         <div className="mb-5 flex flex-wrap items-center gap-2">
           {job.pay ? (
@@ -1074,6 +1079,8 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
               </div>
             </Card>
           )}
+
+          {job.claimable ? <ClaimListing job={job} /> : null}
         </div>
       </div>
     </div>
