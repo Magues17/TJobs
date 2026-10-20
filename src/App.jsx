@@ -74,6 +74,7 @@ import EmployerDashboardPage from './employer/EmployerDashboardPage'
 import EmployerForgotPasswordPage from './employer/EmployerForgotPasswordPage'
 import EmployerResetPasswordPage from './employer/EmployerResetPasswordPage'
 import CandidateActionPanel from './employer/CandidateActionPanel'
+import { EmployerJobPaidPage, EmployerPricing, EmployerSignupForm, EmployerVerifyPage } from './employer/SelfServe'
 import AdminLoginPage from './admin/AdminLoginPage'
 import AdminDashboardPage from './admin/AdminDashboardPage'
 import { track } from './lib/track'
@@ -371,6 +372,9 @@ function getInitialRoute() {
   if (page === 'employer-reset-password' && token) {
     return { page: 'employer-reset-password', jobId: null }
   }
+  // Self-serve signup links from emails and the Square redirect.
+  if (page === 'employer-verify' && token) return { page, jobId: null }
+  if (['employer-job-paid', 'employer-login', 'employer-forgot-password', 'list-business'].includes(page)) return { page, jobId: null }
   // Landing pages use their slug as the page key.
   const landing = findLandingPage(pathname)
   if (landing) return { page: landing.slug, jobId: null }
@@ -1746,9 +1750,22 @@ function ListBusinessPage() {
   return (
     <div className="mx-auto max-w-4xl">
       <SectionHeader
-        title="Join as an Employer"
-        subtitle="Start a secure Square checkout, then come right back into TarboroJobs to finish account setup."
+        title="Hire in Tarboro & Edgecombe County"
+        subtitle="Post your first job free. After that it is $29 a post, or $49/month for unlimited posts."
       />
+
+      <div className="mb-5">
+        <EmployerPricing />
+      </div>
+
+      <div className="mb-5">
+        <Card title="Sign up free">
+          <p className="mb-4 text-sm leading-6 text-slate-400">
+            Create your employer account, confirm your email, and post your first job free. We review first posts before they go live.
+          </p>
+          <EmployerSignupForm Field={Field} Input={Input} />
+        </Card>
+      </div>
 
       <div className="mb-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <div className="rounded-[30px] border border-slate-800 bg-slate-900/90 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
@@ -1768,7 +1785,7 @@ function ListBusinessPage() {
         </div>
       </div>
 
-      <Card title="Start Employer Plan">
+      <Card title="Hiring often? Start the $49/month plan">
         <div className="space-y-5">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
             <div className="text-sm font-semibold text-white">Secure checkout first</div>
@@ -2433,13 +2450,14 @@ export default function TarboroJobsHomepage() {
 
   async function createEmployerJob(payload) {
     const token = getStoredEmployerToken()
-    await apiCreateEmployerJob(token, payload)
+    const data = await apiCreateEmployerJob(token, payload)
     await Promise.all([
       loadEmployerJobs(token),
       loadEmployerStats(token),
       loadJobs(),
       loadBusinesses(),
     ])
+    return data
   }
 
   async function updateEmployerJob(jobId, payload) {
@@ -2779,6 +2797,12 @@ export default function TarboroJobsHomepage() {
       {currentPage === 'seeker-profile' && <SeekerProfilePage jobs={jobs} />}
       {currentPage === 'seeker-jobs' && <SeekerJobsPage />}
       {currentPage === 'list-business' && <ListBusinessPage />}
+      {currentPage === 'employer-verify' && (
+        <EmployerVerifyPage onVerified={loadEmployerSession} setCurrentPage={setCurrentPage} />
+      )}
+      {currentPage === 'employer-job-paid' && (
+        <EmployerJobPaidPage setCurrentPage={setCurrentPage} signedIn={!!employerSession} />
+      )}
       {currentPage === 'employer-login' && (
         <EmployerLoginPage
           setCurrentPage={setCurrentPage}

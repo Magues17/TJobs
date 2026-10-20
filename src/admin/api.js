@@ -107,3 +107,24 @@ export async function deleteAdminJob(apiKeyOverride, jobId) {
     headers: buildAdminHeaders(apiKeyOverride, false),
   })
 }
+
+export async function loadReviewQueue() {
+  return requestJson(`${API_BASE}/admin/review-queue`, {
+    headers: buildAdminHeaders(null, false),
+  })
+}
+
+export async function approveReviewJob(jobId) {
+  return requestJson(`${API_BASE}/admin/jobs/${jobId}/approve`, {
+    method: 'POST',
+    headers: buildAdminHeaders(null, true),
+  })
+}
+
+export async function rejectReviewJob(jobId, reason) {
+  return requestJson(`${API_BASE}/admin/jobs/${jobId}/reject`, {
+    method: 'POST',
+    headers: buildAdminHeaders(null, true),
+    body: JSON.stringify({ reason }),
+  })
+}

@@ -103,7 +103,7 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
       const notCredit = `COALESCE(paid_via, '') <> 'credit'`
       const num = (v) => Number(v) || 0
 
-      const [today, daily, pages, jobs, referrers, campaigns, devices, types, checkouts, resume, cover, prep, employer, bundle, featured] = await Promise.all([
+      const [today, daily, pages, jobs, referrers, campaigns, devices, types, checkouts, resume, cover, prep, employer, jobPost, bundle, featured] = await Promise.all([
         q(`SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today`),
         q(`SELECT DATE_FORMAT(created_at, '%Y-%m-%d') AS day, COUNT(DISTINCT visitor_id) AS visitors, SUM(event_type = 'page_view') AS page_views
            FROM analytics_events WHERE ${since} GROUP BY day ORDER BY day`),
@@ -122,6 +122,7 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM cover_letter_requests WHERE payment_status = 'paid' AND ${notCredit} AND ${paidSince}`),
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM interview_prep_requests WHERE payment_status = 'paid' AND ${notCredit} AND ${paidSince}`),
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(amount_cents), 0) AS cents FROM employer_pending_checkouts WHERE payment_status = 'paid' AND ${paidSince}`),
+        q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM job_post_orders WHERE payment_status = 'paid' AND ${paidSince}`),
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM bundle_orders WHERE status = 'paid' AND ${paidSince}`),
         q(`SELECT COUNT(*) AS orders, COALESCE(SUM(price_cents), 0) AS cents FROM featured_orders WHERE status = 'paid' AND ${paidSince}`),
       ])
@@ -140,6 +141,7 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
         cover_letter: { orders: num(cover[0]?.orders), cents: num(cover[0]?.cents) },
         interview_prep: { orders: num(prep[0]?.orders), cents: num(prep[0]?.cents) },
         employer_plan: { orders: num(employer[0]?.orders), cents: num(employer[0]?.cents) },
+        job_post: { orders: num(jobPost[0]?.orders), cents: num(jobPost[0]?.cents) },
         bundle: { orders: num(bundle[0]?.orders), cents: num(bundle[0]?.cents) },
         featured: { orders: num(featured[0]?.orders), cents: num(featured[0]?.cents) },
       }

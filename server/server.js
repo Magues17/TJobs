@@ -20,6 +20,7 @@ import { register as registerFacebook } from './facebook.js'
 import { register as registerSeekers } from './seekers.js'
 import { createSeo } from './seo.js'
 import { register as registerFeatured, orderFeaturedFirst, isFeatured } from './featured.js'
+import { registerEmployerSelfServe, resolvePayPerPostStatus } from './employerSelfServe.js'
 
 dotenv.config()
 
@@ -704,9 +705,20 @@ function createAuthToken(user) {
   )
 }
 
+// Can sign in and post/manage their own jobs. Verified self-serve
+// (pay_per_post) employers always can; everyone else needs a live plan.
 function isEmployerEligible(employer) {
+  if (employer?.plan === 'pay_per_post' && employer.access_status === 'active') return true
+  return hasSubscriptionFeatures(employer)
+}
+
+// The $49/month plan: free unlimited posts, applicant search and the
+// candidate pipeline. A self-serve employer only has it once they bought the
+// plan (which links them to Square).
+function hasSubscriptionFeatures(employer) {
   if (!employer) return false
   if (employer.access_status !== 'active') return false
+  if (employer.plan === 'pay_per_post' && !isSquareBilledEmployer(employer)) return false
   const status = employer.subscription_status || 'active'
   const periodEnd = parseDateOrNull(employer.current_period_end)
   if (status === 'active') {
@@ -2000,6 +2012,7 @@ async function loadEmployerSessionByUserId(userId) {
       e.square_customer_id,
       e.square_subscription_id,
       e.subscription_synced_at,
+      e.plan,
       e.onboarding_completed
     FROM employer_users eu
     INNER JOIN employers e ON e.id = eu.employer_id
@@ -2092,6 +2105,8 @@ async function requireEmployerAuth(req, res, next) {
         access_status: session.access_status,
         current_period_end: session.current_period_end,
         onboarding_completed: !!session.onboarding_completed,
+        plan: session.plan || 'subscription',
+        has_subscription_features: hasSubscriptionFeatures(session),
       },
       // Kept apart from employer, which /me returns to the browser.
       billing: {
@@ -2142,6 +2157,18 @@ function requireEligibleEmployer(req, res, next) {
     })
   }
 
+  next()
+}
+
+// After requireEligibleEmployer: features only the $49/month plan includes.
+function requireSubscriptionEmployer(req, res, next) {
+  if (!hasSubscriptionFeatures({ ...req.auth.employer, ...req.auth.billing })) {
+    return res.status(403).json({
+      success: false,
+      error: 'Applicant search and the candidate pipeline are part of the $49/month employer plan.',
+      upgrade_required: true,
+    })
+  }
   next()
 }
 
@@ -2790,6 +2817,12 @@ app.post('/api/square/webhook', async (req, res) => {
     // Featured listing payments (note "featured:<token>"); see featured.js.
     if (await featured.tryHandlePayment(payment)) {
       return res.status(200).json({ success: true, type: 'featured' })
+    }
+
+    // Pay-per-post job listings ("job_post:<token>" notes); see employerSelfServe.js.
+    const jobPostType = await selfServe.tryHandleJobPostPayment(payment)
+    if (jobPostType) {
+      return res.status(200).json({ success: true, type: jobPostType })
     }
 
     // A full refund of any employer payment (first or renewal) re-reads the
@@ -3825,6 +3858,7 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
         e.square_customer_id,
         e.square_subscription_id,
         e.subscription_synced_at,
+        e.plan,
         e.onboarding_completed
       FROM employer_users eu
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -3856,6 +3890,13 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
 
     const isAdmin = !!user.is_admin
 
+    if (!isAdmin && user.plan === 'pay_per_post' && user.access_status === 'pending') {
+      return res.status(403).json({
+        success: false,
+        error: 'Please confirm your email first. Check your inbox for the confirmation link, or sign up again to get a new one.',
+      })
+    }
+
     if (!isAdmin && !user.onboarding_completed) {
       return res.status(403).json({
         success: false,
@@ -3885,6 +3926,7 @@ app.post('/api/employer-auth/login', rateLimitByIp(consumeLoginRate, 'Too many l
         subscription_status: user.subscription_status,
         access_status: user.access_status,
         onboarding_completed: !!user.onboarding_completed,
+        plan: user.plan || 'subscription',
       },
       admin: {
         authenticated: isAdmin,
@@ -3930,7 +3972,8 @@ app.post('/api/employer-auth/forgot-password', rateLimitByIp(consumeForgotPasswo
         e.current_period_end,
         e.square_customer_id,
         e.square_subscription_id,
-        e.subscription_synced_at
+        e.subscription_synced_at,
+        e.plan
       FROM employer_users eu
       INNER JOIN employers e ON e.id = eu.employer_id
       WHERE LOWER(eu.email) = ?
@@ -4013,7 +4056,8 @@ app.get('/api/employer-auth/reset-password/validate', rateLimitByIp(consumeReset
         e.current_period_end,
         e.square_customer_id,
         e.square_subscription_id,
-        e.subscription_synced_at
+        e.subscription_synced_at,
+        e.plan
       FROM employer_password_reset_tokens prt
       INNER JOIN employer_users eu ON eu.id = prt.employer_user_id
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -4107,7 +4151,8 @@ app.post('/api/employer-auth/reset-password', rateLimitByIp(consumeResetPassword
         e.current_period_end,
         e.square_customer_id,
         e.square_subscription_id,
-        e.subscription_synced_at
+        e.subscription_synced_at,
+        e.plan
       FROM employer_password_reset_tokens prt
       INNER JOIN employer_users eu ON eu.id = prt.employer_user_id
       INNER JOIN employers e ON e.id = eu.employer_id
@@ -4459,6 +4504,7 @@ app.get('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asyn
         expired_at,
         posting_guidelines_accepted,
         posting_guidelines_accepted_at,
+        review_note,
         updated_at,
         source_url,
         featured_until,
@@ -4538,7 +4584,12 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
       })
     }
 
-    const lifecycle = resolveJobLifecycleFields(status)
+    // Without the monthly plan a post goes live only after review (the free
+    // first post) or payment (every later one); see employerSelfServe.js.
+    const payPerPost = !hasSubscriptionFeatures({ ...req.auth.employer, ...req.auth.billing })
+    const lifecycle = payPerPost
+      ? { status: await selfServe.newPostStatus(employerId), publishedAt: null, expiresAt: null, expiredAt: null }
+      : resolveJobLifecycleFields(status)
     const guidelinesAcceptedAt = complianceCertified ? new Date() : null
 
     const [result] = await pool.query(
@@ -4584,9 +4635,30 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
       ]
     )
 
+    if (payPerPost) {
+      const { checkout_url: checkoutUrl } = await selfServe.afterPayPerPostCreated({
+        jobId: result.insertId,
+        employerId,
+        status: lifecycle.status,
+        jobTitle,
+        businessName: req.auth.employer.business_name,
+      })
+      return res.json({
+        success: true,
+        id: result.insertId,
+        status: lifecycle.status,
+        checkout_url: checkoutUrl,
+        message:
+          lifecycle.status === 'pending_review'
+            ? 'Your free post is saved. We review first posts before they go live and will email you once it is approved.'
+            : 'Your post is saved. Pay $29 to publish it for 30 days.',
+      })
+    }
+
     res.json({
       success: true,
       id: result.insertId,
+      status: lifecycle.status,
       message:
         lifecycle.status === 'open'
           ? `Job created successfully. It will expire automatically in ${JOB_POST_EXPIRATION_DAYS} days.`
@@ -4643,9 +4715,18 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
       'full-time'
     )
     const experienceLevel = toNullableString(req.body.experience_level, 255)
-    const status = normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, 'open')
+    const payPerPost = !hasSubscriptionFeatures({ ...req.auth.employer, ...req.auth.billing })
+    const payPerPostStatus = payPerPost ? resolvePayPerPostStatus(ownedJob.status, req.body.status) : null
+    const status = payPerPost ? payPerPostStatus.status : normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, 'open')
     const complianceCertified = parseBoolean(req.body.compliance_certified)
     const blockedTerms = getBlockedJobPostingTerms([jobTitle, jobDescription])
+
+    if (payPerPostStatus?.error) {
+      return res.status(400).json({
+        success: false,
+        error: payPerPostStatus.error,
+      })
+    }
 
     if (!jobTitle || !jobDescription) {
       return res.status(400).json({
@@ -4745,7 +4826,10 @@ app.patch(
       await expireOpenJobs()
       const employerId = req.auth.employer_id
       const jobId = Number(req.params.id)
-      const status = normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, null)
+      const payPerPost = !hasSubscriptionFeatures({ ...req.auth.employer, ...req.auth.billing })
+      const status = payPerPost
+        ? normalizeEnum(req.body.status, new Set([...ALLOWED_JOB_STATUSES, 'pending_review', 'awaiting_payment', 'rejected']), null)
+        : normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, null)
 
       if (!jobId) {
         return res.status(400).json({
@@ -4775,6 +4859,16 @@ app.patch(
           success: false,
           error: 'You do not have permission to modify this job.',
         })
+      }
+
+      if (payPerPost) {
+        const payPerPostStatus = resolvePayPerPostStatus(ownedJob.status, status)
+        if (payPerPostStatus.error) {
+          return res.status(400).json({
+            success: false,
+            error: payPerPostStatus.error,
+          })
+        }
       }
 
       if (status === 'open' && !ownedJob.posting_guidelines_accepted) {
@@ -5009,7 +5103,7 @@ app.get('/api/employer/resume-files/:name', requireEmployerAuth, requireEligible
 
 app.get('/api/admin/resume-files/:name', requireAdminAuth, (req, res) => sendResumeFile(req, res, null))
 
-app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, async (req, res) => {
+app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, async (req, res, next) => {
   try {
     const employerId = req.auth.employer_id
     const page = Math.max(parseInt(req.query.page || '1', 10), 1)
@@ -5026,6 +5120,13 @@ app.get('/api/employer/resumes', requireEmployerAuth, requireEligibleEmployer, a
         success: false,
         error: 'Invalid candidate status filter.',
       })
+    }
+
+    // Pay-per-post employers see the applicants to their own posts; searching
+    // and filtering them is a monthly-plan feature.
+    const filtered = search || city || employmentType || candidateStatus
+    if (filtered && !hasSubscriptionFeatures({ ...req.auth.employer, ...req.auth.billing })) {
+      return requireSubscriptionEmployer(req, res, next)
     }
 
     const whereParts = ['js.employer_id = ?']
@@ -5197,6 +5298,7 @@ app.post(
   '/api/employer/candidate-actions',
   requireEmployerAuth,
   requireEligibleEmployer,
+  requireSubscriptionEmployer,
   async (req, res) => {
     try {
       const employerId = req.auth.employer_id
@@ -5355,6 +5457,7 @@ app.patch(
   '/api/employer/candidate-actions/:id',
   requireEmployerAuth,
   requireEligibleEmployer,
+  requireSubscriptionEmployer,
   async (req, res) => {
     try {
       const employerId = req.auth.employer_id
@@ -5672,6 +5775,7 @@ app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
         e.access_status,
         e.current_period_end,
         e.subscription_synced_at,
+        e.plan,
         e.onboarding_completed,
         e.created_at,
         e.updated_at,
@@ -5728,6 +5832,7 @@ app.get('/api/admin/employers', requireAdminAuth, async (req, res) => {
       access_status: row.access_status,
       current_period_end: row.current_period_end,
       subscription_synced_at: row.subscription_synced_at,
+      plan: row.plan || 'subscription',
       onboarding_completed: !!row.onboarding_completed,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -6227,6 +6332,7 @@ function scheduleScrapes() {
     jobAlerts.runDigests({ trigger: 'schedule' })
       .catch((error) => console.error('[alerts] scheduled digest run failed:', error)),
     facebook.postNewJobs(),
+    selfServe.cleanupUnpaidJobPosts().catch((error) => console.error('[job-post] unpaid cleanup failed:', error?.message || error)),
   ])
   setTimeout(check, SCRAPE_FIRST_CHECK_MS)
   setInterval(check, SCRAPE_CHECK_EVERY_MS)
@@ -6797,7 +6903,7 @@ app.get('/api/admin/ai-orders', requireAdminAuth, async (req, res) => {
     const now = new Date()
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
 
-    const [totalsResult, recentResult] = await Promise.all([
+    const [totalsResult, recentResult, jobDrafts] = await Promise.all([
       pool.query(
         `
         SELECT
@@ -6822,6 +6928,11 @@ app.get('/api/admin/ai-orders', requireAdminAuth, async (req, res) => {
         LIMIT 25
         `
       ),
+      // Free "Write it for me" drafts for employers: cost only, no sales.
+      selfServe.getJobDraftCosts(monthStart).catch((error) => {
+        console.error('GET /api/admin/ai-orders job draft costs error:', error?.message || error)
+        return null
+      }),
     ])
 
     const [totalsRows] = totalsResult
@@ -6851,6 +6962,7 @@ app.get('/api/admin/ai-orders', requireAdminAuth, async (req, res) => {
         failed_orders: byProduct.reduce((sum, item) => sum + item.failed_orders, 0),
       },
       by_product: byProduct,
+      job_drafts: jobDrafts,
       recent_orders: recentRows.map((row) => ({
         product: row.product,
         id: row.id,
@@ -6902,6 +7014,33 @@ app.post('/api/admin/ai-orders/:product/:id/rerun', requireAdminAuth, async (req
     console.error('POST /api/admin/ai-orders/:product/:id/rerun error:', error)
     res.status(500).json({ success: false, error: 'Failed to rerun the order.' })
   }
+})
+
+// Free employer signup, pay-per-post listings, AI job drafts, review queue.
+const selfServe = registerEmployerSelfServe({
+  app,
+  pool,
+  bcrypt,
+  createAuthToken,
+  safeTrim,
+  normalizeEmail,
+  isValidEmail,
+  toNullableString,
+  sha256,
+  createIpRateLimiter,
+  rateLimitByIp,
+  requireAdminAuth,
+  requireEmployerAuth,
+  requireEligibleEmployer,
+  hasSubscriptionFeatures,
+  getMailer,
+  getMailFrom,
+  escapeHtml,
+  createSquareQuickPayLink,
+  tableColumnExists,
+  APP_BASE_URL,
+  ADMIN_EMAILS,
+  DB_NAME,
 })
 
 // Must be registered before the static catch-all and the /api 404 below.
@@ -7078,6 +7217,7 @@ async function startServer() {
   await ensureEmployerSubscriptionSyncColumn()
   // Required: the public job queries select job_posts.featured_until.
   await featured.ensureTables()
+  await selfServe.ensureSchema()
   // The AI order tables only serve the AI routes; never let them stop the site.
   await ensureCoverLetterTable().catch((error) => console.error('STARTUP: cover letter table setup failed:', error?.message || error))
   await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))

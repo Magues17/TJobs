@@ -113,7 +113,7 @@ export default function EmployerLoginPage({
               onClick={() => setCurrentPage('list-business')}
               className="text-sm font-medium text-cyan-300 hover:underline"
             >
-              Need an employer plan?
+              New here? Sign up free
             </button>
           </div>
         </form>
