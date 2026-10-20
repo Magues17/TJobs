@@ -10,6 +10,7 @@
 // All sub-components are local to this file.
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { track } from '../lib/track'
 import { Loader2, CheckCircle2, Lock, ChevronDown, ChevronUp, ArrowLeft, Sparkles } from 'lucide-react'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
@@ -75,6 +76,7 @@ function InterviewPrepForm({ onReady }) {
       setError('Please enter a job title.')
       return
     }
+    track('tool_start', { product: 'interview_prep' })
     try {
       setSubmitting(true)
       const res = await fetch(`${API_BASE}/interview-prep/generate`, {
@@ -173,6 +175,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onPaid }) {
         }
         url = data.checkoutUrl
       }
+      track('checkout_start', { product: 'interview_prep' })
       window.location.href = url
     } catch (err) {
       setError(err?.message || 'Could not start checkout.')

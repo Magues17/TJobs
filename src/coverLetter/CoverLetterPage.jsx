@@ -11,6 +11,7 @@
 // URL handling: ?token=cl_... on mount → start in 'paywall' mode and poll.
 
 import { useState, useEffect, useRef } from 'react'
+import { track } from '../lib/track'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -90,6 +91,7 @@ function CoverLetterForm({ onGenerated }) {
     if (!jobTitle.trim()) { setError('Please enter the job title you are applying for.'); return }
     if (!background.trim()) { setError('Please tell us about your background and experience.'); return }
 
+    track('tool_start', { product: 'cover_letter' })
     try {
       setSubmitting(true)
       const res = await fetch(`${API_BASE}/cover-letter/generate`, {
@@ -211,6 +213,7 @@ function PaywallCard({ publicToken, jobTitle, checkoutUrl, fresh, onUnlocked }) 
         }
         url = data.checkoutUrl
       }
+      track('checkout_start', { product: 'cover_letter' })
       window.location.href = url
     } catch (err) {
       setError(err?.message || 'Could not start checkout.')

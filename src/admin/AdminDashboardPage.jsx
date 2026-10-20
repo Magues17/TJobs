@@ -267,6 +267,143 @@ function AiProductsPanel({ Card, refreshKey }) {
   )
 }
 
+const PRODUCT_LABELS = {
+  resume_check: 'Resume check',
+  cover_letter: 'Cover letter',
+  interview_prep: 'Interview prep',
+  employer_plan: 'Employer plan',
+  job_post: 'Job post',
+  featured: 'Featured',
+}
+
+function BarList({ rows, empty = 'Nothing yet.' }) {
+  const max = Math.max(1, ...rows.map((row) => row.value))
+  if (!rows.length) return <p className="text-sm text-slate-500">{empty}</p>
+  return (
+    <ul className="space-y-1.5">
+      {rows.map((row) => (
+        <li key={row.key} className="relative overflow-hidden rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm">
+          <div className="absolute inset-y-0 left-0 bg-cyan-400/15" style={{ width: `${(row.value / max) * 100}%` }} />
+          <div className="relative flex items-center justify-between gap-3">
+            <span className="min-w-0 truncate text-slate-200">{row.label}</span>
+            <span className="shrink-0 font-semibold text-white">{row.value}</span>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+// Anonymous first-party usage stats from /api/admin/analytics.
+function AnalyticsPanel({ Card, refreshKey }) {
+  const [days, setDays] = useState(30)
+  const [report, setReport] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    requestAdminJson(`/admin/analytics?days=${days}`)
+      .then((data) => { if (!cancelled) { setReport(data); setError('') } })
+      .catch((err) => { if (!cancelled) setError(err?.message || 'Could not load analytics.') })
+    return () => { cancelled = true }
+  }, [days, refreshKey])
+
+  const s = report?.summary
+  const tiles = s ? [
+    { label: 'Visitors today', value: s.today_visitors, note: `7-day avg ${s.avg7_visitors}` },
+    { label: 'Page views today', value: s.today_page_views, note: `7-day avg ${s.avg7_page_views}` },
+    { label: 'Alert signups', value: s.alert_signups, note: `last ${report.days} days` },
+    { label: 'Revenue', value: formatCents(s.revenue_cents), note: `last ${report.days} days` },
+  ] : []
+  const f = report?.funnel
+  const funnelSteps = f ? [
+    ['Viewed a job', f.job_view],
+    ['Started applying', f.apply_start],
+    ['Clicked official site', f.outbound_apply_click],
+    ['Submitted application', f.apply_submit],
+  ] : []
+
+  return (
+    <Card title="Analytics">
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          {[7, 30, 90].map((n) => (
+            <button
+              key={n}
+              type="button"
+              onClick={() => setDays(n)}
+              className={`rounded-full px-3 py-1 font-semibold ${days === n ? 'bg-cyan-400 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+            >
+              {n} days
+            </button>
+          ))}
+          <span className="text-xs text-slate-500">No cookies, no IPs, honors Do Not Track.</span>
+        </div>
+        {error ? <p className="text-sm text-rose-300">{error}</p> : null}
+        {!report && !error ? <p className="text-sm text-slate-500">Loading...</p> : null}
+        {report ? (
+          <>
+            <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+              {tiles.map((tile) => (
+                <div key={tile.label} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">{tile.label}</div>
+                  <div className="mt-1 text-2xl font-semibold text-white">{tile.value}</div>
+                  <div className="text-xs text-slate-500">{tile.note}</div>
+                </div>
+              ))}
+            </div>
+            <div>
+              <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Daily visitors</h4>
+              <BarList rows={[...report.daily].reverse().map((d) => ({ key: d.day, label: `${d.day} (${d.page_views} views)`, value: d.visitors }))} empty="No visits recorded yet." />
+            </div>
+            <div className="grid gap-5 md:grid-cols-2">
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Top jobs</h4>
+                <BarList rows={report.top_jobs.map((j) => ({ key: j.job_id, label: j.title || `Job #${j.job_id}`, value: j.views }))} />
+              </div>
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Top pages</h4>
+                <BarList rows={report.top_pages.map((p) => ({ key: p.path, label: p.path, value: p.views }))} />
+              </div>
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Referrers</h4>
+                <BarList rows={report.referrers.map((r) => ({ key: r.host, label: r.host, value: r.visitors }))} />
+              </div>
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Campaigns and devices</h4>
+                <BarList
+                  rows={[
+                    ...report.campaigns.map((c) => ({ key: `c-${c.campaign}-${c.source}-${c.medium}`, label: `${c.campaign}${c.source ? ` / ${c.source}` : ''}`, value: c.visitors })),
+                    ...report.devices.map((d) => ({ key: `d-${d.device}`, label: `Device: ${d.device}`, value: d.visitors })),
+                  ]}
+                />
+              </div>
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Apply funnel (sessions)</h4>
+                <BarList rows={funnelSteps.map(([label, value]) => ({ key: label, label, value }))} />
+              </div>
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Revenue by product</h4>
+                <ul className="space-y-1.5 text-sm">
+                  {report.products.map((p) => (
+                    <li key={p.product} className="rounded-lg bg-slate-950/60 px-3 py-1.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-slate-200">{PRODUCT_LABELS[p.product] || p.product}</span>
+                        <span className="font-semibold text-white">{formatCents(p.revenue_cents)}</span>
+                      </div>
+                      <div className="text-xs text-slate-500">{p.checkout_starts} checkout starts, {p.purchases} paid</div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </>
+        ) : null}
+      </div>
+    </Card>
+  )
+}
+
 export default function AdminDashboardPage({
   adminOverview,
   employers,
@@ -445,6 +582,8 @@ export default function AdminDashboardPage({
           </div>
         ))}
       </div>
+
+      <AnalyticsPanel Card={Card} refreshKey={aiRefreshKey} />
 
       <AiProductsPanel Card={Card} refreshKey={aiRefreshKey} />
 

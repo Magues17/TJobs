@@ -13,6 +13,7 @@ import pool from './db.js'
 import { analyzeResume, previewFromFullReport } from './resumeAnalyzer.js'
 import { runAllScrapers } from './jobScraper.js'
 import { generateCoverLetter, generateInterviewPrep } from './aiService.js'
+import { registerAnalytics } from './analytics.js'
 
 dotenv.config()
 
@@ -6146,6 +6147,7 @@ function scheduleScrapes() {
       .catch((error) => console.error('[scraper] scheduled run failed:', error)),
     runSubscriptionSyncExclusive({ onlyIfStale: true, trigger: 'schedule' })
       .catch((error) => console.error('[subscriptions] scheduled sync failed:', error)),
+    analytics.purgeOldEvents().catch((error) => console.error('[analytics] purge failed:', error?.message || error)),
   ])
   setTimeout(check, SCRAPE_FIRST_CHECK_MS)
   setInterval(check, SCRAPE_CHECK_EVERY_MS)
@@ -6812,6 +6814,16 @@ app.post('/api/admin/ai-orders/:product/:id/rerun', requireAdminAuth, async (req
   }
 })
 
+// Must be registered before the static catch-all and the /api 404 below.
+const analytics = registerAnalytics({
+  app,
+  pool,
+  createIpRateLimiter,
+  getRequestIp,
+  requireAdminAuth,
+  prices: { resume_check: RESUME_CHECKER_PRICE_CENTS },
+})
+
 if (fs.existsSync(frontendIndexFile)) {
   app.use(express.static(frontendDistDir))
 
@@ -6871,6 +6883,7 @@ async function startServer() {
   // The AI order tables only serve the AI routes; never let them stop the site.
   await ensureCoverLetterTable().catch((error) => console.error('STARTUP: cover letter table setup failed:', error?.message || error))
   await ensureInterviewPrepTable().catch((error) => console.error('STARTUP: interview prep table setup failed:', error?.message || error))
+  await analytics.ensureTable().catch((error) => console.error('STARTUP: analytics table setup failed:', error?.message || error))
   await expireOpenJobs()
 
   app.listen(PORT, () => {
