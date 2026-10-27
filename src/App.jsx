@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Briefcase,
   Building2,
@@ -81,6 +81,7 @@ import { track } from './lib/track'
 import JobAlertSignup from './alerts/JobAlertSignup'
 import AlertPage from './alerts/AlertPages'
 import LandingLinks from './LandingLinks'
+import ShareButtons from './share/ShareButtons'
 import { OneClickApply, SaveJobButton, SeekerJobsPage, SeekerProfilePage, SeekerSignInPage, SeekerVerifyPage } from './seeker/SeekerPages'
 import { useSeeker } from './seeker/session'
 import { findLandingPage, landingJobs } from '../shared/landingPages.js'
@@ -390,6 +391,24 @@ function buildPublicPath(page, jobId = null) {
   if (aiToolPages.includes(page) || seekerPages.includes(page)) return `/?page=${page}`
   if (findLandingPage(page)) return `/${page}`
   return '/'
+}
+
+const pageTitleOverrides = {
+  businesses: 'Local Businesses',
+  'list-business': 'Post a Job',
+  'submit-resume': 'Submit Your Resume',
+}
+
+function pageTitle(page, jobId, job) {
+  if (page === 'jobs') return 'Jobs in Tarboro, NC & Edgecombe County | TarboroJobs'
+  const landing = findLandingPage(page)
+  if (landing) return landing.title
+  if (page === 'job-detail' || page === 'job-apply') {
+    if (!job || Number(job.id) !== Number(jobId)) return 'Job Details | TarboroJobs'
+    return `${page === 'job-apply' ? 'Apply: ' : ''}${job.title} - ${job.company} | TarboroJobs`
+  }
+  const name = pageTitleOverrides[page] || page.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  return `${name} | TarboroJobs`
 }
 
 function formatPostedDate(value) {
@@ -738,6 +757,34 @@ function formatExpiryDate(value) {
   return date.toLocaleDateString()
 }
 
+const HOME_TITLE = 'Jobs in Tarboro & Edgecombe County'
+
+// Whole calendar days between a posted date and today (null when unparseable).
+function daysSince(value) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  date.setHours(0, 0, 0, 0)
+  return Math.round((today - date) / 86400000)
+}
+
+function boardSummary(jobs) {
+  if (!jobs.length) return ''
+  const towns = new Set(jobs.map((job) => job.city).filter(Boolean)).size
+  const ages = jobs.map((job) => daysSince(job.posted)).filter((days) => days !== null)
+  const newest = ages.length ? Math.max(0, Math.min(...ages)) : null
+  return [
+    `${jobs.length} ${jobs.length === 1 ? 'job' : 'jobs'}`,
+    towns ? `${towns} ${towns === 1 ? 'town' : 'towns'}` : '',
+    newest === null ? '' : newest === 0 ? 'updated today' : newest === 1 ? 'updated yesterday' : `updated ${newest} days ago`,
+  ].filter(Boolean).join(' · ')
+}
+
+const chipBadge = 'rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-0.5 text-[11px] font-medium text-slate-300'
+const hiddenScrollbar = '[scrollbar-width:none] [&::-webkit-scrollbar]:hidden'
+
 function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
   const [search, setSearch] = useState('')
   const [industry, setIndustry] = useState('All Industries')
@@ -763,174 +810,116 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
     })
   }, [jobs, search, industry, type])
 
-  const activeCities = new Set(jobs.map((job) => job.city).filter(Boolean)).size
+  const heading = landing ? landing.h1 : HOME_TITLE
+  const filterSelect = 'appearance-none bg-transparent pr-1 text-sm text-slate-100 outline-none'
+
+  // Browse chips + email alert sit after the first 8 jobs (and under "no results").
+  const afterJobs = (
+    <>
+      {!landing && (
+        <div className="chip-row-scroll">
+          <LandingLinks heading="Browse by" onNavigate={onBrowse} className="my-4" />
+        </div>
+      )}
+      <div className="my-4">
+        <JobAlertSignup jobs={jobs} keywords={search} />
+      </div>
+    </>
+  )
 
   return (
     <div>
-      <SectionHeader
-        title={landing ? landing.h1 : 'Local Job Board'}
-        subtitle={landing ? landing.intro : 'Click into each listing for the full job description, apply flow, and employer-specific application routing.'}
-      />
-
-      <div className="mb-5 grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-        <div className="relative overflow-hidden rounded-[32px] border border-slate-800 bg-slate-900/90 p-5 shadow-[0_22px_70px_rgba(2,6,23,0.28)] sm:p-6">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.18),transparent_30%)]" />
-          <div className="relative">
-            <div className="mb-3 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">
-              Find work close to home
-            </div>
-            <h2 className="max-w-2xl text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-              Browse local jobs, then open the full posting.
-            </h2>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">
-              Each posting now has its own detail page so applicants can review the role first and then apply directly to that exact employer and job.
-            </p>
-          </div>
-        </div>
-
-        <div className="rounded-[32px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_22px_70px_rgba(2,6,23,0.24)] sm:p-6">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Board snapshot</div>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-              <div className="text-xs text-slate-400">Open jobs</div>
-              <div className="mt-1 text-2xl font-semibold text-white">{jobs.length}</div>
-            </div>
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-              <div className="text-xs text-slate-400">Cities</div>
-              <div className="mt-1 text-2xl font-semibold text-white">{activeCities || 0}</div>
-            </div>
-          </div>
-          <div className="mt-4 text-sm leading-6 text-slate-400">
-            Listings stay cleaner when each job has one source of truth for the description, expiration window, and apply flow.
-          </div>
+      <div className="mb-4">
+        <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-4xl">{heading}</h1>
+        <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">
+          {landing ? landing.intro : 'Local openings. Tap a job to see details and apply.'}
+        </p>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-slate-500">{loading ? 'Loading jobs…' : boardSummary(jobs)}</p>
+          <ShareButtons compact title={`${heading} | TarboroJobs`} />
         </div>
       </div>
 
-      {!landing && <LandingLinks heading="Browse by" onNavigate={onBrowse} className="mb-5" />}
-
-      <SearchRow
-        placeholder="Search jobs, companies, or keywords"
-        search={search}
-        setSearch={setSearch}
-        industry={industry}
-        setIndustry={setIndustry}
-        type={type}
-        setType={setType}
-        showType
-      />
-
-      {!loading && (
-        <div className="mb-5">
-          <JobAlertSignup jobs={jobs} keywords={search} />
+      <div className="mb-4 space-y-2">
+        <div className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/85 px-4">
+          <Search className="h-4 w-4 shrink-0 text-slate-500" />
+          <input
+            type="search"
+            className="w-full bg-transparent py-3 text-base text-slate-100 outline-none placeholder:text-slate-500 sm:text-sm"
+            placeholder="Search jobs — nurse, driver, teacher…"
+            aria-label="Search jobs"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
         </div>
-      )}
+        <div className={`-mx-4 flex gap-2 overflow-x-auto px-4 sm:mx-0 sm:px-0 ${hiddenScrollbar}`}>
+          <label className="flex h-11 shrink-0 items-center gap-2 rounded-full border border-slate-700 bg-slate-900/85 px-4">
+            <ListFilter className="h-4 w-4 shrink-0 text-slate-500" />
+            <select className={filterSelect} style={{ colorScheme: 'dark' }} aria-label="Industry" value={industry} onChange={(e) => setIndustry(e.target.value)}>
+              {industries.map((option) => (
+                <option key={option} value={option} style={{ backgroundColor: '#020617', color: '#f8fafc' }}>{option}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex h-11 shrink-0 items-center gap-2 rounded-full border border-slate-700 bg-slate-900/85 px-4">
+            <Briefcase className="h-4 w-4 shrink-0 text-slate-500" />
+            <select className={filterSelect} style={{ colorScheme: 'dark' }} aria-label="Job type" value={type} onChange={(e) => setType(e.target.value)}>
+              {jobTypes.map((option) => (
+                <option key={option} value={option} style={{ backgroundColor: '#020617', color: '#f8fafc' }}>{option}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
 
       {loading ? (
-        <StatStrip
-          items={[
-            { label: 'Loading', value: '…', note: 'Fetching current jobs' },
-            { label: 'Board', value: '…', note: 'Refreshing employers' },
-            { label: 'Filter', value: '…', note: 'Preparing results' },
-            { label: 'Preview', value: '…', note: 'Please wait' },
-          ]}
-        />
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-center text-sm text-slate-400">Fetching current jobs…</div>
       ) : filteredJobs.length === 0 ? (
-        <EmptyState
-          icon={Briefcase}
-          title="No jobs found"
-          body="Try adjusting your search or filters to see more local opportunities."
-        />
+        <>
+          <EmptyState
+            icon={Briefcase}
+            title="No jobs found"
+            body="Try adjusting your search or filters to see more local opportunities."
+          />
+          {afterJobs}
+        </>
       ) : (
-        <div className="grid gap-4 sm:gap-5">
-          {filteredJobs.map((job) => (
-            <article
-              key={job.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => onViewJob(job.id)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  onViewJob(job.id)
-                }
-              }}
-              className="cursor-pointer rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.24)] transition hover:border-cyan-400/25 sm:p-6"
-            >
-              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                <div className="min-w-0">
-                  <FeaturedBadge job={job} className="mb-2 mr-2" />
-                  <div className="mb-2 inline-flex rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-[11px] font-medium text-slate-300">
-                    {job.industry || 'Local employer'}
-                  </div>
-                  <h2 className="text-2xl font-semibold tracking-tight text-white sm:text-[28px]">
-                    {job.title}
-                  </h2>
-                  <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-slate-400">
-                    <span className="inline-flex items-center gap-1.5 break-words">
-                      <Building2 className="h-4 w-4 shrink-0 text-cyan-300" />
-                      {job.company}
-                    </span>
-                    {job.city && (
-                      <span className="inline-flex items-center gap-1.5">
-                        <MapPin className="h-4 w-4 shrink-0 text-cyan-300" />
-                        {job.city}
-                      </span>
-                    )}
-                    {job.type && (
-                      <span className="inline-flex items-center gap-1.5">
-                        <Briefcase className="h-4 w-4 shrink-0 text-cyan-300" />
-                        {humanizeJobType(job.type)}
-                      </span>
-                    )}
-                    <span className="inline-flex items-center gap-1.5">
-                      <Clock3 className="h-4 w-4 shrink-0 text-cyan-300" />
-                      {formatPostedDate(job.posted)}
-                    </span>
-                  </div>
-                </div>
-
-                {job.pay && (
-                  <div className="self-start rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-300">
-                    {job.pay}
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                {job.experience_level && (
-                  <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">
-                    {job.experience_level}
-                  </span>
-                )}
-                <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">
-                  Expires {formatExpiryDate(job.expires_at)}
-                </span>
-              </div>
-
-              {job.description && (
-                <p className="mt-4 line-clamp-4 whitespace-pre-line break-words text-sm leading-6 text-slate-300">
-                  {job.description}
-                </p>
-              )}
-
-              <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-                <div className="text-xs text-slate-500">Open the job page to review the full posting and apply.</div>
-                <div className="flex items-center gap-2">
-                  <SaveJobButton jobId={job.id} />
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation()
+        <div className="grid gap-3">
+          {filteredJobs.map((job, index) => {
+            const posted = daysSince(job.posted)
+            return (
+              <Fragment key={job.id}>
+                <article
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onViewJob(job.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
                       onViewJob(job.id)
-                    }}
-                    className="rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
-                  >
-                    View job
-                  </button>
-                </div>
-              </div>
-            </article>
-          ))}
+                    }
+                  }}
+                  className="cursor-pointer rounded-2xl border border-slate-800 bg-slate-900/85 p-4 transition hover:border-cyan-400/25"
+                >
+                  <h2 className="break-words text-base font-semibold leading-snug text-white sm:text-lg">{job.title}</h2>
+                  <div className="mt-1 break-words text-sm text-slate-400">
+                    {[job.company, job.city].filter(Boolean).join(' · ')}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <FeaturedBadge job={job} />
+                    {posted !== null && posted <= 3 && (
+                      <span className="rounded-full border border-emerald-400/40 bg-emerald-400/15 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-200">New</span>
+                    )}
+                    {job.type && <span className={chipBadge}>{humanizeJobType(job.type)}</span>}
+                    {job.pay && <span className="text-sm font-bold text-white">{job.pay}</span>}
+                    <span className="ml-auto"><SaveJobButton jobId={job.id} /></span>
+                  </div>
+                </article>
+                {index === 7 && filteredJobs.length > 8 && afterJobs}
+              </Fragment>
+            )
+          })}
+          {filteredJobs.length <= 8 && afterJobs}
         </div>
       )}
 
@@ -988,25 +977,28 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
         title={job.title}
         subtitle={`${job.company} • ${job.city || 'Tarboro area'}${job.type ? ` • ${humanizeJobType(job.type)}` : ''}`}
         action={
-          /^https?:\/\//i.test(job.source_url || '') ? (
-            <a
-              href={job.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={() => track('outbound_apply_click', { job_id: job.id })}
-              className="block w-full rounded-2xl bg-cyan-400 px-5 py-3 text-center text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
-            >
-              Apply on official site
-            </a>
-          ) : (
-            <button
-              type="button"
-              onClick={onApply}
-              className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
-            >
-              Apply for this job
-            </button>
-          )
+          <div className="flex flex-col gap-3 md:items-end">
+            {/^https?:\/\//i.test(job.source_url || '') ? (
+              <a
+                href={job.source_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => track('outbound_apply_click', { job_id: job.id })}
+                className="block w-full rounded-2xl bg-cyan-400 px-5 py-3 text-center text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
+              >
+                Apply on official site
+              </a>
+            ) : (
+              <button
+                type="button"
+                onClick={onApply}
+                className="w-full rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] transition hover:bg-cyan-300 md:w-auto"
+              >
+                Apply for this job
+              </button>
+            )}
+            <ShareButtons jobId={job.id} title={`${job.title} - ${job.company}`} />
+          </div>
         }
       />
 
@@ -2639,6 +2631,11 @@ export default function TarboroJobsHomepage() {
   useEffect(() => {
     track('page_view', { path: selectedPublicJobId && currentPage.startsWith('job-') ? buildPublicPath(currentPage, selectedPublicJobId) : currentPage === 'jobs' ? '/' : `/${currentPage}` })
   }, [currentPage, selectedPublicJobId])
+
+  // Browser tab / share-preview title follows the SPA route.
+  useEffect(() => {
+    document.title = pageTitle(currentPage, selectedPublicJobId, publicJobDetail)
+  }, [currentPage, selectedPublicJobId, publicJobDetail])
 
   useEffect(() => {
     if (currentPage === 'job-detail' && publicJobDetail?.id) track('job_view', { job_id: publicJobDetail.id })

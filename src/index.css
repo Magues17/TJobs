@@ -1,1 +1,17 @@
 @import "tailwindcss";
+/* Single scrollable row for the landing-page chips on the home page (LandingLinks wraps by default). */
+.chip-row-scroll {
+  min-width: 0; /* it is a grid item: without this the nowrap row widens the whole page */
+}
+.chip-row-scroll nav > div:last-child {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chip-row-scroll nav > div:last-child::-webkit-scrollbar {
+  display: none;
+}
+.chip-row-scroll nav a {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
