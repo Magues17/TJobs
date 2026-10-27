@@ -5,7 +5,7 @@ import express from 'express'
 
 export const EVENT_TYPES = new Set([
   'page_view', 'job_view', 'apply_start', 'apply_submit', 'outbound_apply_click',
-  'alert_signup', 'checkout_start', 'tool_start',
+  'alert_signup', 'checkout_start', 'tool_start', 'share',
 ])
 export const PRODUCTS = ['resume_check', 'cover_letter', 'interview_prep', 'employer_plan', 'job_post', 'featured', 'bundle']
 const DEVICES = new Set(['mobile', 'desktop', 'tablet'])
@@ -108,9 +108,11 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
         q(`SELECT DATE_FORMAT(created_at, '%Y-%m-%d') AS day, COUNT(DISTINCT visitor_id) AS visitors, SUM(event_type = 'page_view') AS page_views
            FROM analytics_events WHERE ${since} GROUP BY day ORDER BY day`),
         q(`SELECT path, COUNT(*) AS views FROM analytics_events WHERE event_type = 'page_view' AND ${sinceDays} GROUP BY path ORDER BY views DESC LIMIT 15`),
-        q(`SELECT a.job_id, jp.job_title, COUNT(*) AS views, COUNT(DISTINCT a.visitor_id) AS visitors
+        q(`SELECT a.job_id, jp.job_title, COUNT(*) AS views, COUNT(DISTINCT a.visitor_id) AS visitors, COALESCE(s.shares, 0) AS shares
            FROM analytics_events a LEFT JOIN job_posts jp ON jp.id = a.job_id
-           WHERE a.event_type = 'job_view' AND a.job_id IS NOT NULL AND a.${sinceDays} GROUP BY a.job_id, jp.job_title ORDER BY views DESC LIMIT 10`),
+           LEFT JOIN (SELECT job_id, COUNT(*) AS shares FROM analytics_events
+                      WHERE event_type = 'share' AND job_id IS NOT NULL AND ${sinceDays} GROUP BY job_id) s ON s.job_id = a.job_id
+           WHERE a.event_type = 'job_view' AND a.job_id IS NOT NULL AND a.${sinceDays} GROUP BY a.job_id, jp.job_title, s.shares ORDER BY views DESC LIMIT 10`),
         q(`SELECT referrer_host, COUNT(DISTINCT visitor_id) AS visitors FROM analytics_events
            WHERE referrer_host IS NOT NULL AND ${sinceDays} GROUP BY referrer_host ORDER BY visitors DESC LIMIT 10`),
         q(`SELECT utm_campaign, utm_source, utm_medium, COUNT(DISTINCT visitor_id) AS visitors FROM analytics_events
@@ -161,11 +163,12 @@ export function registerAnalytics({ app, pool, createIpRateLimiter, getRequestIp
           avg7_visitors: avg('visitors'),
           avg7_page_views: avg('page_views'),
           alert_signups: byType.alert_signup?.events || 0,
+          shares: byType.share?.events || 0,
           revenue_cents: products.reduce((s, p) => s + p.revenue_cents, 0),
         },
         daily: dailyAll.slice(-days),
         top_pages: pages.map((r) => ({ path: r.path, views: num(r.views) })),
-        top_jobs: jobs.map((r) => ({ job_id: r.job_id, title: r.job_title || null, views: num(r.views), visitors: num(r.visitors) })),
+        top_jobs: jobs.map((r) => ({ job_id: r.job_id, title: r.job_title || null, views: num(r.views), visitors: num(r.visitors), shares: num(r.shares) })),
         referrers: referrers.map((r) => ({ host: r.referrer_host, visitors: num(r.visitors) })),
         campaigns: campaigns.map((r) => ({ campaign: r.utm_campaign, source: r.utm_source, medium: r.utm_medium, visitors: num(r.visitors) })),
         devices: devices.map((r) => ({ device: r.device, visitors: num(r.visitors) })),
