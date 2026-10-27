@@ -17,6 +17,7 @@ import { registerAnalytics } from './analytics.js'
 import { registerBundles } from './bundles.js'
 import { register as registerJobAlerts } from './alerts.js'
 import { register as registerFacebook } from './facebook.js'
+import { register as registerSharePack } from './sharePack.js'
 import { register as registerSeekers } from './seekers.js'
 import { register as registerIndexNow } from './indexnow.js'
 import { createSeo } from './seo.js'
@@ -6373,6 +6374,7 @@ function scheduleScrapes() {
     jobAlerts.runDigests({ trigger: 'schedule' })
       .catch((error) => console.error('[alerts] scheduled digest run failed:', error)),
     facebook.postNewJobs(),
+    sharePack.sendDailyPack().catch((error) => console.error('[share-pack] scheduled send failed:', error?.message || error)),
     selfServe.cleanupUnpaidJobPosts().catch((error) => console.error('[job-post] unpaid cleanup failed:', error?.message || error)),
   ])
   setTimeout(check, SCRAPE_FIRST_CHECK_MS)
@@ -7115,6 +7117,8 @@ const jobAlerts = registerJobAlerts({
 
 // Facebook Page auto-post: inert unless FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN are set.
 const facebook = registerFacebook({ app, pool, requireAdminAuth, formatPay: formatPayDisplay, APP_BASE_URL })
+// Daily "jobs to share" email to the admins; works without a Facebook Page.
+const sharePack = registerSharePack({ app, pool, getMailer, getMailFrom, requireAdminAuth, formatPay: formatPayDisplay, APP_BASE_URL, adminEmails: ADMIN_EMAILS })
 // Job Seeker Kit ($12.99: one Resume Check + Cover Letter + Interview Prep).
 // Redeeming a credit marks the tool's own order paid via the same functions
 // the Square webhook uses (markAiOrderPaid / the resume check paid UPDATE).
@@ -7270,6 +7274,7 @@ async function startServer() {
   await bundles.ensureTables().catch((error) => console.error('STARTUP: bundle tables setup failed:', error?.message || error))
   await jobAlerts.ensureTables().catch((error) => console.error('STARTUP: job alert tables setup failed:', error?.message || error))
   await facebook.ensureTable().catch((error) => console.error('STARTUP: facebook table setup failed:', error?.message || error))
+  await sharePack.ensureTable().catch((error) => console.error('STARTUP: share pack table setup failed:', error?.message || error))
   await seekers.ensureTables().catch((error) => console.error('STARTUP: job seeker tables setup failed:', error?.message || error))
   await expireOpenJobs()
 
