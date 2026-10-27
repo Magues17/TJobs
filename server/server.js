@@ -18,6 +18,7 @@ import { registerBundles } from './bundles.js'
 import { register as registerJobAlerts } from './alerts.js'
 import { register as registerFacebook } from './facebook.js'
 import { register as registerSeekers } from './seekers.js'
+import { register as registerIndexNow } from './indexnow.js'
 import { createSeo } from './seo.js'
 import { register as registerFeatured, orderFeaturedFirst, isFeatured } from './featured.js'
 import { registerEmployerSelfServe, resolvePayPerPostStatus } from './employerSelfServe.js'
@@ -1009,6 +1010,13 @@ async function getSquarePlanVariationIds() {
   return ids
 }
 
+// Square's answer for a customer or subscription it has never heard of
+// (HTTP 404 / code NOT_FOUND), e.g. a test row with a made-up id. Auth, 5xx
+// and transport errors are not this and keep throwing.
+function isSquareNotFound(error) {
+  return error?.status === 404 || (error?.data?.errors || []).some((entry) => entry?.code === 'NOT_FOUND')
+}
+
 // Stores what Square says about one employer's subscription. Any Square or
 // network error throws before anything is written, so an outage or a bad
 // token never changes anyone's access. Returns { updated, status,
@@ -1022,21 +1030,34 @@ async function syncEmployerSubscription(employer) {
     return { updated: false, message: 'Square subscription sync is not configured.' }
   }
 
+  // Square answered but access stays as-is for the owner to decide; mark it
+  // checked so the scheduled run does not retry hourly.
+  const leaveAsIs = async (message) => {
+    await pool.query(`UPDATE employers SET subscription_synced_at = CURRENT_TIMESTAMP WHERE id = ?`, [employerId])
+    console.warn(`[subscriptions] employer ${employerId}: ${message} Access left as-is.`)
+    return { updated: false, message }
+  }
+
   let subscriptions
-  if (employer.square_customer_id) {
-    const filter = { customer_ids: [employer.square_customer_id] }
-    if (SQUARE_LOCATION_ID) filter.location_ids = [SQUARE_LOCATION_ID]
-    // ponytail: first page only; one customer has a handful of subscriptions.
-    const response = await squareApiRequest('/v2/subscriptions/search', {
-      method: 'POST',
-      body: { query: { filter } },
-    })
-    subscriptions = response?.subscriptions || []
-  } else {
-    const response = await squareApiRequest(
-      `/v2/subscriptions/${encodeURIComponent(employer.square_subscription_id)}`
-    )
-    subscriptions = response?.subscription ? [response.subscription] : []
+  try {
+    if (employer.square_customer_id) {
+      const filter = { customer_ids: [employer.square_customer_id] }
+      if (SQUARE_LOCATION_ID) filter.location_ids = [SQUARE_LOCATION_ID]
+      // ponytail: first page only; one customer has a handful of subscriptions.
+      const response = await squareApiRequest('/v2/subscriptions/search', {
+        method: 'POST',
+        body: { query: { filter } },
+      })
+      subscriptions = response?.subscriptions || []
+    } else {
+      const response = await squareApiRequest(
+        `/v2/subscriptions/${encodeURIComponent(employer.square_subscription_id)}`
+      )
+      subscriptions = response?.subscription ? [response.subscription] : []
+    }
+  } catch (error) {
+    if (!isSquareNotFound(error)) throw error
+    return leaveAsIs(`Square has no record of this employer's ${employer.square_customer_id ? 'customer' : 'subscription'} (${error.message}).`)
   }
 
   const planIds = await getSquarePlanVariationIds()
@@ -1047,14 +1068,12 @@ async function syncEmployerSubscription(employer) {
   const nextStatus = SQUARE_SUBSCRIPTION_STATUS_MAP[subscription?.status]
 
   if (!subscription || !nextStatus) {
-    // Square answered but nothing maps: leave access alone for the owner to
-    // decide, and mark it checked so the daily run does not retry hourly.
-    await pool.query(`UPDATE employers SET subscription_synced_at = CURRENT_TIMESTAMP WHERE id = ?`, [employerId])
-    const message = subscription
-      ? `Square subscription ${subscription.id} has unknown status "${subscription.status}".`
-      : 'Square has no subscription to our plan for this customer.'
-    console.warn(`[subscriptions] employer ${employerId}: ${message} Access left as-is.`)
-    return { updated: false, message }
+    // Nothing maps.
+    return leaveAsIs(
+      subscription
+        ? `Square subscription ${subscription.id} has unknown status "${subscription.status}".`
+        : 'Square has no subscription to our plan for this customer.'
+    )
   }
 
   // An ACTIVE subscription with a future canceled_date stays 'active' until
@@ -6270,6 +6289,7 @@ async function runScrapeExclusive({ onlyIfStale, trigger }) {
       console.log(`[scraper] start (${trigger})`)
       const result = await runAllScrapers(pool)
       console.log(`[scraper] finished (${trigger}): imported ${result?.imported ?? 0}, updated ${result?.updated ?? 0}, closed ${result?.closed ?? 0}, errors ${result?.errors?.length ?? 0}`)
+      if ((result?.imported ?? 0) > 0 || (result?.closed ?? 0) > 0) indexnow.notifyChanged()
       return result
     } finally {
       await connection.query(`SELECT RELEASE_LOCK('tarborojobs_scrape')`).catch(() => {})
@@ -6334,7 +6354,9 @@ async function runSubscriptionSyncExclusive({ onlyIfStale, trigger }) {
 function scheduleScrapes() {
   const check = () => Promise.all([
     runScrapeExclusive({ onlyIfStale: true, trigger: 'schedule' })
-      .catch((error) => console.error('[scraper] scheduled run failed:', error)),
+      .catch((error) => console.error('[scraper] scheduled run failed:', error))
+      // After the scrape so a run that changed jobs has already pinged; this is the once-a-day ping.
+      .then(() => indexnow.notifyChanged({ ifDue: true })),
     runSubscriptionSyncExclusive({ onlyIfStale: true, trigger: 'schedule' })
       .catch((error) => console.error('[subscriptions] scheduled sync failed:', error)),
     analytics.purgeOldEvents().catch((error) => console.error('[analytics] purge failed:', error?.message || error)),
@@ -6366,6 +6388,7 @@ app.get('/api/admin/diagnostics', requireAdminAuth, async (req, res) => {
       jwtSecretConfigured: JWT_SECRET_CONFIGURED,
       adminUserCount: Number(adminRows[0]?.admin_count || 0),
       lastScrapeAt: await getLastScrapeAt(),
+      indexnow: indexnow.status(),
     })
   } catch (error) {
     console.error('GET /api/admin/diagnostics error:', error)
@@ -7061,6 +7084,9 @@ const analytics = registerAnalytics({
   requireAdminAuth,
   prices: { resume_check: RESUME_CHECKER_PRICE_CENTS },
 })
+
+// IndexNow: serves the key file and pings Bing/Yandex when jobs change.
+const indexnow = registerIndexNow({ app, pool, APP_BASE_URL, jwtSecret: JWT_SECRET })
 
 // Email job alerts: routes plus the digest the hourly scheduler runs.
 const jobAlerts = registerJobAlerts({
