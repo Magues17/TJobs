@@ -101,6 +101,13 @@ function describeCriteria(subscription) {
   return parts.length ? parts.join(' · ') : 'all new local jobs'
 }
 
+// CAN-SPAM: every digest carries a physical mailing address. The owner's address
+// is the default; ALERTS_POSTAL_ADDRESS overrides it.
+const DEFAULT_POSTAL_ADDRESS = 'TarboroJobs, 136 Stable Road, Tarboro, NC 27886'
+function postalAddress() {
+  return clean(process.env.ALERTS_POSTAL_ADDRESS, 300) || DEFAULT_POSTAL_ADDRESS
+}
+
 export function register({
   app,
   pool,
@@ -163,7 +170,7 @@ export function register({
 
   function footer(subscription, reason) {
     const manageUrl = `${base}/?page=alerts-unsubscribe&token=${encodeURIComponent(subscription.unsubscribe_token)}`
-    const postal = clean(process.env.ALERTS_POSTAL_ADDRESS, 300)
+    const postal = postalAddress()
     return {
       text: ['--', reason, `Unsubscribe: ${manageUrl}`, postal].filter(Boolean).join('\n'),
       html: `
@@ -270,7 +277,7 @@ export function register({
   async function runDigests({ trigger = 'schedule' } = {}) {
     const now = clock()
     if (etParts(now).hour < SEND_HOUR_ET) return { skipped: 'before_send_hour' }
-    if (!clean(process.env.ALERTS_POSTAL_ADDRESS, 300)) {
+    if (!postalAddress()) {
       console.warn('[alerts] ALERTS_POSTAL_ADDRESS is not set; job alert digests are NOT sent (CAN-SPAM requires a postal address in commercial email).')
       return { skipped: 'no_postal_address' }
     }
@@ -505,7 +512,7 @@ export function register({
         unsubscribed: Number(counts.unsubscribed),
         last_run_at: runs.last_run_at || null,
         sent_last_7_days: Number(runs.sent_last_7_days),
-        postal_address_set: Boolean(clean(process.env.ALERTS_POSTAL_ADDRESS, 300)),
+        postal_address_set: Boolean(postalAddress()),
       })
     } catch (error) {
       console.error('GET /api/admin/alerts error:', error)
