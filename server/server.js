@@ -40,7 +40,17 @@ const JWT_SECRET = (() => {
   console.error('WARNING: JWT_SECRET is not set (or is the old default). Using a random secret; all sessions reset on restart. Set JWT_SECRET to fix this.')
   return crypto.randomBytes(48).toString('hex')
 })()
-const ADMIN_API_KEY = process.env.ADMIN_API_KEY || process.env.ADMIN_BEARER_TOKEN || ''
+const ADMIN_API_KEY = (() => {
+  const key = process.env.ADMIN_API_KEY || process.env.ADMIN_BEARER_TOKEN || ''
+  if (!key) return ''
+  // A short or known key gives anyone admin; refuse it rather than run exposed.
+  // Admin login via an is_admin employer account keeps working.
+  if (key.length < 24 || /^tarboro-admin/i.test(key)) {
+    console.error('WARNING: ADMIN_API_KEY is too weak (min 24 random chars); admin API-key auth is disabled until it is replaced.')
+    return ''
+  }
+  return key
+})()
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || 'jobs@tarborojobs.com')
   .split(',')
   .map((value) => normalizeEmail(value))
