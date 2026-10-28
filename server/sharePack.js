@@ -22,6 +22,13 @@ export function register({
   now: clock = () => new Date(),
 }) {
   const base = String(APP_BASE_URL || '').replace(/\/+$/, '')
+  // SHARE_PACK_TO: who gets the daily email (comma list). Lets a helper with a
+  // working Facebook account post for the owner without being made a site admin.
+  const recipients = String(process.env.SHARE_PACK_TO || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
+  if (!recipients.length) recipients.push(...adminEmails)
   // ponytail: in-memory guard only covers a failed bookkeeping write; the table + GET_LOCK cover processes.
   const state = { running: false, lastSentDay: '' }
 
@@ -88,7 +95,7 @@ ${items
     if (state.running) return { skipped: 'busy' }
     const now = clock()
     if (!force && etParts(now).hour < SEND_HOUR_ET) return { skipped: 'before_send_hour' }
-    if (!adminEmails.length) return { skipped: 'no_recipients' }
+    if (!recipients.length) return { skipped: 'no_recipients' }
     const transporter = getMailer()
     if (!transporter || !base) return { skipped: 'mail_not_configured' }
     state.running = true
@@ -108,17 +115,17 @@ ${items
         return { skipped: 'no_jobs' }
       }
       const pack = buildPack(roundup)
-      await transporter.sendMail({ from: getMailFrom(), to: adminEmails.join(', '), ...pack })
+      await transporter.sendMail({ from: getMailFrom(), to: recipients.join(', '), ...pack })
       state.lastSentDay = today
       await pool
         .query('INSERT INTO share_pack_runs (sent_at, job_count, featured_count, recipients) VALUES (?, ?, ?, ?)', [
           now,
           roundup.jobs.length,
           roundup.featuredCount,
-          adminEmails.join(',').slice(0, 500),
+          recipients.join(',').slice(0, 500),
         ])
         .catch((error) => console.error('[share-pack] could not record run:', error?.message || error))
-      console.log(`[share-pack] sent ${roundup.jobs.length} job(s) to ${adminEmails.length} admin address(es)`)
+      console.log(`[share-pack] sent ${roundup.jobs.length} job(s) to ${recipients.length} address(es)`)
       return { sent: true, jobCount: roundup.jobs.length }
     } catch (error) {
       console.error('[share-pack] failed:', error?.message || error)
@@ -151,7 +158,7 @@ ${items
         lastSentAt: last ? last.at.toISOString() : null,
         lastJobCount: last ? last.jobCount : 0,
         nextRunAfter: nextRunAfter(last ? etParts(last.at).day : '', now).toISOString(),
-        recipients: adminEmails.length,
+        recipients: recipients.length,
       })
     } catch (error) {
       console.error('GET /api/admin/share-pack error:', error)
