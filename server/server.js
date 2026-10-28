@@ -22,6 +22,7 @@ import { register as registerSeekers } from './seekers.js'
 import { register as registerIndexNow } from './indexnow.js'
 import { createSeo } from './seo.js'
 import { register as registerFeatured, orderFeaturedFirst, isFeatured } from './featured.js'
+import { nearYouOrder } from '../shared/site.js'
 import { registerEmployerSelfServe, resolvePayPerPostStatus, applyPlanUpgrade, JOB_POST_PRICE_CENTS, PAID_POST_DAYS } from './employerSelfServe.js'
 
 dotenv.config()
@@ -665,8 +666,8 @@ async function findPublicJobPostById(jobId) {
   return rows.length ? rows[0] : null
 }
 
-// Every job the public can see, featured first then newest (same visibility
-// rules as above); see orderFeaturedFirst in featured.js.
+// Every job the public can see, featured first then nearest town, pay shown,
+// newest (same visibility rules as above); see nearYouOrder in shared/site.js.
 async function listPublicJobPostRows() {
   const [rows] = await pool.query(
     `
@@ -700,7 +701,7 @@ async function listPublicJobPostRows() {
     ORDER BY COALESCE(jp.published_at, jp.created_at) DESC
     `
   )
-  return dedupeJobRows(orderFeaturedFirst(rows))
+  return dedupeJobRows(orderFeaturedFirst(nearYouOrder(rows)))
 }
 
 function createAuthToken(user) {

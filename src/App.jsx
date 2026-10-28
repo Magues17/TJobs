@@ -85,6 +85,7 @@ import ShareButtons from './share/ShareButtons'
 import { OneClickApply, SaveJobButton, SeekerJobsPage, SeekerProfilePage, SeekerSignInPage, SeekerVerifyPage } from './seeker/SeekerPages'
 import { useSeeker } from './seeker/session'
 import { findLandingPage, landingJobs } from '../shared/landingPages.js'
+import { SITE, townTier } from '../shared/site.js'
 import FeaturedBadge from './featured/FeaturedBadge'
 import ClaimListing from './featured/ClaimListing'
 
@@ -580,7 +581,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onL
   )
 }
 
-function SectionHeader({ title, subtitle, action }) {
+function SectionHeader({ title, subtitle, action, children }) {
   return (
     <div className="mb-5 flex flex-col gap-3 md:mb-6 md:flex-row md:items-end md:justify-between">
       <div className="min-w-0">
@@ -593,6 +594,7 @@ function SectionHeader({ title, subtitle, action }) {
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400 sm:text-base">
           {subtitle}
         </p>
+        {children}
       </div>
       {action ? <div className="w-full md:w-auto">{action}</div> : null}
     </div>
@@ -757,7 +759,10 @@ function formatExpiryDate(value) {
   return date.toLocaleDateString()
 }
 
-const HOME_TITLE = 'Jobs in Tarboro & Edgecombe County'
+const HOME_TITLE = `Jobs in ${SITE.region}`
+
+// ?work= slug for a home-page chip: the label's first word, lowercased.
+const workSlug = (label) => label.split(/\W/)[0].toLowerCase()
 
 // Whole calendar days between a posted date and today (null when unparseable).
 function daysSince(value) {
@@ -787,8 +792,20 @@ const hiddenScrollbar = '[scrollbar-width:none] [&::-webkit-scrollbar]:hidden'
 
 function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
   const [search, setSearch] = useState('')
-  const [industry, setIndustry] = useState('All Industries')
+  const initialWork = landing ? null : SITE.workTypes.find(([label]) => workSlug(label) === new URLSearchParams(window.location.search).get('work'))
+  const [work, setWork] = useState(initialWork ? workSlug(initialWork[0]) : '')
+  // A single industry name (select, landing pages) or a list of them (work chips).
+  const [industry, setIndustry] = useState(initialWork ? initialWork[1] : 'All Industries')
   const [type, setType] = useState('All Types')
+
+  function pickIndustry(next, slug = '') {
+    setWork(slug)
+    setIndustry(next)
+    const url = new URL(window.location.href)
+    if (slug) url.searchParams.set('work', slug)
+    else url.searchParams.delete('work')
+    window.history.replaceState({}, '', url)
+  }
 
   const filteredJobs = useMemo(() => {
     return jobs.filter((job) => {
@@ -800,7 +817,7 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
 
       const matchesIndustry =
         industry === 'All Industries' ||
-        String(job.industry || '').toLowerCase() === industry.toLowerCase()
+        [].concat(industry).some((option) => option.toLowerCase() === String(job.industry || '').toLowerCase())
 
       const matchesType =
         type === 'All Types' ||
@@ -831,13 +848,30 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
     <div>
       <div className="mb-4">
         <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-4xl">{heading}</h1>
-        <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">
-          {landing ? landing.intro : 'Local openings. Tap a job to see details and apply.'}
-        </p>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-slate-500">{loading ? 'Loading jobs…' : boardSummary(jobs)}</p>
-          <ShareButtons compact title={`${heading} | TarboroJobs`} />
-        </div>
+        {landing && <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">{landing.intro}</p>}
+        <p className="mt-2 text-xs text-slate-500">{loading ? 'Loading jobs…' : boardSummary(jobs)}</p>
+        {!landing && (
+          <div className="mt-4">
+            <p className="text-lg font-semibold text-white">What kind of work are you looking for?</p>
+            <div className="mt-2 flex flex-wrap gap-2" role="group" aria-label="Kind of work">
+              {[['Anything', 'All Industries'], ...SITE.workTypes].map(([label, list]) => {
+                const slug = list === 'All Industries' ? '' : workSlug(label)
+                const on = slug ? work === slug : industry === 'All Industries'
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => pickIndustry(list, slug)}
+                    className={`flex min-h-[44px] grow basis-[calc(50%-0.25rem)] items-center justify-center rounded-2xl border px-3 py-2 text-center text-sm font-semibold transition sm:grow-0 sm:basis-auto ${on ? 'border-cyan-400 bg-cyan-400 text-slate-950' : 'border-slate-700 bg-slate-900/85 text-slate-200 hover:border-cyan-400/40'}`}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="mb-4 space-y-2">
@@ -855,7 +889,7 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
         <div className={`-mx-4 flex gap-2 overflow-x-auto px-4 sm:mx-0 sm:px-0 ${hiddenScrollbar}`}>
           <label className="flex h-11 shrink-0 items-center gap-2 rounded-full border border-slate-700 bg-slate-900/85 px-4">
             <ListFilter className="h-4 w-4 shrink-0 text-slate-500" />
-            <select className={filterSelect} style={{ colorScheme: 'dark' }} aria-label="Industry" value={industry} onChange={(e) => setIndustry(e.target.value)}>
+            <select className={filterSelect} style={{ colorScheme: 'dark' }} aria-label="Industry" value={Array.isArray(industry) ? 'All Industries' : industry} onChange={(e) => pickIndustry(e.target.value)}>
               {industries.map((option) => (
                 <option key={option} value={option} style={{ backgroundColor: '#020617', color: '#f8fafc' }}>{option}</option>
               ))}
@@ -923,6 +957,11 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
         </div>
       )}
 
+      <div className="my-6 flex flex-wrap items-center gap-3">
+        <span className="text-sm text-slate-400">Know someone looking? Share these jobs:</span>
+        <ShareButtons title={`${heading} | ${SITE.name}`} />
+      </div>
+
       {landing && <LandingLinks heading="More local job searches" currentSlug={landing.slug} onNavigate={onBrowse} />}
     </div>
   )
@@ -960,6 +999,15 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
     )
   }
 
+  const external = /^https?:\/\//i.test(job.source_url || '')
+  const where = job.city ? [job.city, SITE.tierWords[townTier(job.city)]].filter(Boolean).join(' — ') : ''
+  const facts = [
+    ['Pay', job.pay || 'Pay not listed'],
+    job.type && ['Type', humanizeJobType(job.type)],
+    where && ['Where', where],
+    ['How to apply', external ? `Apply on ${job.company}'s site` : 'Apply here'],
+  ].filter(Boolean)
+
   return (
     <div className="mx-auto max-w-5xl">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -978,7 +1026,7 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
         subtitle={`${job.company} • ${job.city || 'Tarboro area'}${job.type ? ` • ${humanizeJobType(job.type)}` : ''}`}
         action={
           <div className="flex flex-col gap-3 md:items-end">
-            {/^https?:\/\//i.test(job.source_url || '') ? (
+            {external ? (
               <a
                 href={job.source_url}
                 target="_blank"
@@ -1000,20 +1048,18 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
             <ShareButtons jobId={job.id} title={`${job.title} - ${job.company}`} />
           </div>
         }
-      />
+      >
+        <div className="mt-3 flex flex-wrap gap-2">
+          {facts.map(([label, value]) => (
+            <span key={label} className="rounded-2xl border border-slate-700 bg-slate-950/60 px-3 py-1.5 text-sm font-medium text-slate-100">
+              <span className="mr-1.5 text-xs uppercase tracking-wide text-slate-500">{label}</span>
+              {value}
+            </span>
+          ))}
+        </div>
+      </SectionHeader>
 
       <FeaturedBadge job={job} className="mb-4" />
-
-      {job.pay || job.type ? (
-        <div className="mb-5 flex flex-wrap items-center gap-2">
-          {job.pay ? (
-            <span className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-base font-semibold text-cyan-300">{job.pay}</span>
-          ) : null}
-          {job.type ? (
-            <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">{humanizeJobType(job.type)}</span>
-          ) : null}
-        </div>
-      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
         <div className="space-y-5">
