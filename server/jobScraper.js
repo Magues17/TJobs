@@ -507,7 +507,7 @@ const UPSERT_SQL = `
     (employer_id, job_title, city, industry, source, external_id, source_url,
      job_description, expires_at, pay_min, pay_max, pay_type,
      employment_type, status, published_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NOW())
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW() + INTERVAL 14 DAY), ?, ?, ?, ?, 'open', NOW())
   ON DUPLICATE KEY UPDATE
     employer_id     = VALUES(employer_id),
     employment_type = VALUES(employment_type),
@@ -516,13 +516,22 @@ const UPSERT_SQL = `
     industry        = VALUES(industry),
     source_url      = VALUES(source_url),
     job_description = VALUES(job_description),
-    expires_at      = COALESCE(VALUES(expires_at), expires_at),
+    expires_at      = VALUES(expires_at),
     pay_min         = COALESCE(VALUES(pay_min), pay_min),
     pay_max         = COALESCE(VALUES(pay_max), pay_max),
     pay_type        = COALESCE(VALUES(pay_type), pay_type),
-    status          = IF(status = 'closed', 'open', status),
+    status          = IF(status = 'closed' OR (status = 'expired' AND VALUES(expires_at) > NOW()), 'open', status),
     updated_at      = NOW()
 `
+
+// A source closing date wins; otherwise the listing lapses 14 days after the source last showed it.
+// Re-seen jobs roll forward, so a job that vanishes from a partial fetch still ages out.
+if (process.argv[1]?.endsWith('jobScraper.js') && process.argv.includes('--self-test')) {
+  if (!UPSERT_SQL.includes('COALESCE(?, NOW() + INTERVAL 14 DAY)') || !/expires_at\s+= VALUES\(expires_at\),/.test(UPSERT_SQL)) {
+    throw new Error('UPSERT_SQL must roll expires_at forward on every sighting')
+  }
+  console.log('jobScraper upsert expiry self-test ok')
+}
 
 // Scraped postings hang off one auto-created, pre-approved employer per organization,
 // because public listings require an active, onboarded employer.
@@ -584,6 +593,11 @@ export async function runAllScrapers(pool) {
   let closed = 0
   const errors = []
   const employerCache = new Map()
+
+  // Idempotent backfill: scraped rows from before rolling expiry get 14 days from their last sighting.
+  await pool
+    .query(`UPDATE job_posts SET expires_at = updated_at + INTERVAL 14 DAY, updated_at = updated_at WHERE source IS NOT NULL AND status = 'open' AND expires_at IS NULL`)
+    .catch((err) => errors.push({ source: 'backfill', error: err.message }))
 
   for (const { name, fn } of scrapers) {
     let jobs

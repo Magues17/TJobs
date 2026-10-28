@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Lock } from 'lucide-react'
 import { employerLogin } from './api'
 import { setStoredEmployerToken } from './auth'
+import { ResendConfirmation } from './SelfServe'
 
 export default function EmployerLoginPage({
   setCurrentPage,
@@ -96,6 +97,7 @@ export default function EmployerLoginPage({
           {error && (
             <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
               {error}
+              {/confirm your email/i.test(error) && <ResendConfirmation email={formData.email} />}
             </div>
           )}
 

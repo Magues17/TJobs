@@ -25,6 +25,7 @@ const TIME_ZONE = 'America/New_York'
 export const SEND_HOUR_ET = 9
 const ROUNDUP_MAX_JOBS = 8
 const ROUNDUP_MIN_FRESH = 3
+const ROUNDUP_FETCH = 50 // over-fetch so duplicates can be dropped before the 8-job cap
 const DAY_MS = 24 * 60 * 60 * 1000
 
 // Calendar day ('YYYY-MM-DD'), hour (0-23) and weekday in America/New_York.
@@ -43,6 +44,16 @@ export function etParts(date) {
       .map((part) => [part.type, part.value])
   )
   return { day: `${p.year}-${p.month}-${p.day}`, hour: Number(p.hour), weekday: p.weekday }
+}
+
+// Same title + employer + city is one job to the public. Rows must already be in display order
+// (the first row of each group wins); the database rows are left alone.
+export function dedupeJobRows(rows) {
+  const seen = new Set()
+  return rows.filter((r) => {
+    const key = [r.job_title, r.employer_id ?? r.business_name, r.city].map((v) => String(v ?? '').trim().toLowerCase()).join('|')
+    return !seen.has(key) && seen.add(key)
+  })
 }
 
 // Single source of truth for the daily roundup (Facebook Page post and the share-pack email).
@@ -68,19 +79,20 @@ export async function buildRoundup({ pool, formatPay, APP_BASE_URL, now = new Da
          AND COALESCE(jp.published_at, jp.created_at) > ?
        ORDER BY is_featured DESC, COALESCE(jp.published_at, jp.created_at) DESC, jp.id DESC
        LIMIT ?`,
-      [...(hasFeatured ? [now] : []), now, since, ROUNDUP_MAX_JOBS]
+      [...(hasFeatured ? [now] : []), now, since, ROUNDUP_FETCH]
     )
-    return rows
+    return dedupeJobRows(rows).slice(0, ROUNDUP_MAX_JOBS)
   }
   let rows = await select(new Date(now.getTime() - DAY_MS))
   if (rows.length < ROUNDUP_MIN_FRESH) rows = await select(new Date(now.getTime() - 3 * DAY_MS))
   if (!rows.length) return { text: '', jobs: [], total: 0, featuredCount: 0 }
 
-  const [[countRow]] = await pool.query(
-    `SELECT COUNT(*) AS n FROM job_posts jp INNER JOIN employers e ON e.id = jp.employer_id WHERE ${visible}`,
+  // Counted in JS so "See all N jobs" matches the deduped public listing.
+  const [visibleRows] = await pool.query(
+    `SELECT jp.job_title, jp.city, e.business_name FROM job_posts jp INNER JOIN employers e ON e.id = jp.employer_id WHERE ${visible}`,
     [now]
   )
-  const total = Math.max(Number(countRow?.n) || 0, rows.length)
+  const total = Math.max(dedupeJobRows(visibleRows).length, rows.length)
   const jobs = rows.map((r) => ({ ...r, featured: Boolean(Number(r.is_featured)) }))
   const lines = jobs.map((j) => {
     const pay = formatPay ? formatPay(j.pay_min, j.pay_max, j.pay_type) : ''

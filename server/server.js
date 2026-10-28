@@ -16,13 +16,13 @@ import { generateCoverLetter, generateInterviewPrep } from './aiService.js'
 import { registerAnalytics } from './analytics.js'
 import { registerBundles } from './bundles.js'
 import { register as registerJobAlerts } from './alerts.js'
-import { register as registerFacebook } from './facebook.js'
+import { register as registerFacebook, dedupeJobRows } from './facebook.js'
 import { register as registerSharePack } from './sharePack.js'
 import { register as registerSeekers } from './seekers.js'
 import { register as registerIndexNow } from './indexnow.js'
 import { createSeo } from './seo.js'
 import { register as registerFeatured, orderFeaturedFirst, isFeatured } from './featured.js'
-import { registerEmployerSelfServe, resolvePayPerPostStatus } from './employerSelfServe.js'
+import { registerEmployerSelfServe, resolvePayPerPostStatus, JOB_POST_PRICE_CENTS, PAID_POST_DAYS } from './employerSelfServe.js'
 
 dotenv.config()
 
@@ -700,7 +700,7 @@ async function listPublicJobPostRows() {
     ORDER BY COALESCE(jp.published_at, jp.created_at) DESC
     `
   )
-  return orderFeaturedFirst(rows)
+  return dedupeJobRows(orderFeaturedFirst(rows))
 }
 
 function createAuthToken(user) {
@@ -2531,6 +2531,15 @@ app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_
       })
     }
 
+    // Same address on the same job (guest or one-click) is one candidate.
+    const [earlier] = await pool.query(
+      'SELECT id FROM job_seekers WHERE job_post_id = ? AND LOWER(email) = ? LIMIT 1',
+      [job.id, email.toLowerCase()]
+    )
+    if (earlier.length) {
+      return res.json({ success: true, duplicate: true, message: "You've already applied to this job." })
+    }
+
     const { id, resumeFileUrl, ats } = await createJobApplication(
       job,
       { fullName, email, phone, city, desiredJobTitle, employmentType, skills, applicantNote },
@@ -4284,10 +4293,24 @@ app.post('/api/employer-auth/reset-password', rateLimitByIp(consumeResetPassword
 })
 
 app.get('/api/employer-auth/me', requireEmployerAuth, async (req, res) => {
+  // Pay-per-post terms the dashboard shows; the free-post flag is read here so
+  // the session query does not depend on the self-serve columns.
+  let freePostUsed = false
+  try {
+    const [rows] = await pool.query('SELECT free_post_used_at FROM employers WHERE id = ? LIMIT 1', [req.auth.employer_id])
+    freePostUsed = !!rows[0]?.free_post_used_at
+  } catch (error) {
+    console.error('GET /api/employer-auth/me free-post lookup error:', error?.message || error)
+  }
   res.json({
     success: true,
     employer_user: req.auth.employer_user,
-    employer: req.auth.employer,
+    employer: {
+      ...req.auth.employer,
+      free_post_used: freePostUsed,
+      post_days: PAID_POST_DAYS,
+      post_price_cents: JOB_POST_PRICE_CENTS,
+    },
     admin: req.auth.admin,
   })
 })
@@ -4690,7 +4713,7 @@ app.post('/api/employer/jobs', requireEmployerAuth, requireEligibleEmployer, asy
         message:
           lifecycle.status === 'pending_review'
             ? 'Your free post is saved. We review first posts before they go live and will email you once it is approved.'
-            : 'Your post is saved. Pay $29 to publish it for 30 days.',
+            : `Your post is saved. Pay $${(JOB_POST_PRICE_CENTS / 100).toFixed(2)} to publish it for ${PAID_POST_DAYS} days.`,
       })
     }
 
@@ -4756,7 +4779,9 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
     const experienceLevel = toNullableString(req.body.experience_level, 255)
     const payPerPost = !hasSubscriptionFeatures({ ...req.auth.employer, ...req.auth.billing })
     const payPerPostStatus = payPerPost ? resolvePayPerPostStatus(ownedJob.status, req.body.status) : null
-    const status = payPerPost ? payPerPostStatus.status : normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, 'open')
+    // An edited rejected post goes back to the admin review queue.
+    const resubmitted = payPerPost && ownedJob.status === 'rejected' && payPerPostStatus.status === 'rejected'
+    const status = resubmitted ? 'pending_review' : payPerPost ? payPerPostStatus.status : normalizeEnum(req.body.status, ALLOWED_JOB_STATUSES, 'open')
     const complianceCertified = parseBoolean(req.body.compliance_certified)
     const blockedTerms = getBlockedJobPostingTerms([jobTitle, jobDescription])
 
@@ -4845,7 +4870,9 @@ app.patch('/api/employer/jobs/:id', requireEmployerAuth, requireEligibleEmployer
       message:
         lifecycle.status === 'open' && ownedJob.status !== 'open'
           ? `Job updated successfully and renewed for ${JOB_POST_EXPIRATION_DAYS} days.`
-          : 'Job updated successfully.',
+          : resubmitted
+            ? 'Sent back for review. We will email you once it is approved.'
+            : 'Job updated successfully.',
     })
   } catch (error) {
     console.error('PATCH /api/employer/jobs/:id error:', error)

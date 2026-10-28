@@ -1759,13 +1759,7 @@ function ListBusinessPage() {
         </Card>
       </div>
 
-      <div className="mb-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <div className="rounded-[30px] border border-slate-800 bg-slate-900/90 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Employer access</div>
-          <p className="mt-4 text-sm leading-6 text-slate-300">
-            TarboroJobs now generates a secure, one-time Square checkout session for each employer signup. After payment is confirmed by webhook, your onboarding link is issued automatically.
-          </p>
-        </div>
+      <div className="mb-5 grid gap-4">
         <div className="rounded-[30px] border border-slate-800 bg-slate-900/85 p-5 shadow-[0_18px_60px_rgba(2,6,23,0.24)] sm:p-6">
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">What you get</div>
           <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-300">
@@ -2454,13 +2448,14 @@ export default function TarboroJobsHomepage() {
 
   async function updateEmployerJob(jobId, payload) {
     const token = getStoredEmployerToken()
-    await apiUpdateEmployerJob(token, jobId, payload)
+    const data = await apiUpdateEmployerJob(token, jobId, payload)
     await Promise.all([
       loadEmployerJobs(token),
       loadEmployerStats(token),
       loadJobs(),
       loadBusinesses(),
     ])
+    return data
   }
 
   async function updateEmployerJobStatus(jobId, status) {

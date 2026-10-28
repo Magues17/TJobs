@@ -85,6 +85,15 @@ function formatDateTime(value) {
   return date.toLocaleString()
 }
 
+// PDF text keeps its newlines; private-use/box bullet glyphs become real bullets.
+function cleanResumeText(value) {
+  return String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[-□•·]+[ \t]*/g, '• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 function formatShortDate(value) {
   if (!value) return '—'
   const date = new Date(value)
@@ -273,7 +282,23 @@ export default function EmployerDashboardPage({
   // per post; no applicant search or candidate pipeline.
   const payPerPost = employer?.plan === 'pay_per_post' && !employer?.has_subscription_features
   const selectedCandidateAction = selectedResume ? candidateActions[selectedResume.id] || null : null
-  const [activeSection, setActiveSection] = useState('overview')
+  const postDays = employer?.post_days || 30
+  const postPrice = `$${(employer?.post_price_cents || 2900) / 100}`
+  const liveDays = payPerPost ? postDays : 14
+  const upgradeNote = (
+    <>
+      Want unlimited posts and candidate tools? Email{' '}
+      <a href="mailto:jobs@tarborojobs.com?subject=%2449%2Fmonth%20plan" className="font-semibold underline">jobs@tarborojobs.com</a>{' '}
+      about the $49/month plan.
+    </>
+  )
+  // The verify page sends new employers here with ?tab=jobs.
+  const [activeSection, setActiveSection] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('tab') !== 'jobs') return 'overview'
+    window.history.replaceState({}, '', '/')
+    return 'jobs'
+  })
 
   const [accountForm, setAccountForm] = useState({
     business_name: employer?.business_name || '',
@@ -455,8 +480,8 @@ export default function EmployerDashboardPage({
       }
 
       if (editingJobId) {
-        await onUpdateJob(editingJobId, payload)
-        setJobMessage(payPerPost ? 'Job updated successfully.' : 'Job updated successfully. Open listings auto-expire after 14 days.')
+        const updated = await onUpdateJob(editingJobId, payload)
+        setJobMessage(payPerPost ? updated?.message || 'Job updated successfully.' : 'Job updated successfully. Open listings auto-expire after 14 days.')
       } else {
         const created = await onCreateJob(payload)
         if (created?.checkout_url) {
@@ -464,7 +489,7 @@ export default function EmployerDashboardPage({
           window.location.assign(created.checkout_url)
           return
         }
-        setJobMessage(created?.message || 'Job posted successfully. It will auto-expire after 14 days.')
+        setJobMessage(created?.message || `Job posted successfully. It will auto-expire after ${liveDays} days.`)
       }
 
       setJobForm(getEmptyJobForm(employer?.city || 'Tarboro, NC'))
@@ -605,7 +630,7 @@ export default function EmployerDashboardPage({
                   <QuickActionButton icon={PlusCircle} label="Post a Job" sublabel="Create or edit listings" onClick={() => setActiveSection('jobs')} />
                   <QuickActionButton icon={Users} label="Open Candidates" sublabel="Review resumes and statuses" onClick={() => setActiveSection('candidates')} />
                   <QuickActionButton icon={ShieldCheck} label="Update Account" sublabel="Business profile and password" onClick={() => setActiveSection('account')} />
-                  <QuickActionButton icon={Bookmark} label="Reviewed Candidates" sublabel="View only reviewed applicants" onClick={() => { onCandidateViewChange('reviewed'); setActiveSection('candidates') }} />
+                  {payPerPost ? null : <QuickActionButton icon={Bookmark} label="Reviewed Candidates" sublabel="View only reviewed applicants" onClick={() => { onCandidateViewChange('reviewed'); setActiveSection('candidates') }} />}
                 </div>
               </section>
 
@@ -625,14 +650,23 @@ export default function EmployerDashboardPage({
                       <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Access Status</div>
                       <div className="mt-1 font-medium text-white">{employer?.access_status || '—'}</div>
                     </div>
-                    <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Subscription</div>
-                      <div className="mt-1 font-medium text-white">{employer?.subscription_status || '—'}</div>
-                    </div>
-                    <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Period End</div>
-                      <div className="mt-1 font-medium text-white">{employer?.current_period_end ? formatShortDate(employer.current_period_end) : '—'}</div>
-                    </div>
+                    {(payPerPost
+                      ? [
+                          ['Plan', `Pay per post (${postPrice} a post)`],
+                          ['Free first post', employer?.free_post_used ? 'Used' : 'Available'],
+                          ['Open jobs', statsLoading ? '...' : employerStats?.open_jobs ?? 0],
+                          ['Candidates', statsLoading ? '...' : employerStats?.total_resumes ?? 0],
+                        ]
+                      : [
+                          ['Subscription', employer?.subscription_status || '—'],
+                          ['Period End', employer?.current_period_end ? formatShortDate(employer.current_period_end) : '—'],
+                        ]
+                    ).map(([label, value]) => (
+                      <div key={label} className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                        <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">{label}</div>
+                        <div className="mt-1 font-medium text-white">{value}</div>
+                      </div>
+                    ))}
                   </div>
 
                   <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-4">
@@ -741,7 +775,7 @@ export default function EmployerDashboardPage({
               <PanelHeader
                 icon={PlusCircle}
                 title={editingJobId ? 'Edit Job' : 'Post a Job'}
-                subtitle="Use the cleaner form to manage one listing, certify compliance, and let open posts auto-expire after 14 days."
+                subtitle={`Use the cleaner form to manage one listing, certify compliance, and let open posts auto-expire after ${liveDays} days.`}
               />
               <form onSubmit={handleSubmitJob} className="space-y-4 p-5">
                 <Field label="Job Title" required>
@@ -851,7 +885,7 @@ export default function EmployerDashboardPage({
 
                 {payPerPost ? (
                   <div className="rounded-[26px] border border-cyan-400/20 bg-cyan-400/10 p-4 text-sm leading-6 text-cyan-50/90">
-                    Your first post is free and goes live after a quick review. Each post after that is $29 and stays live for 30 days. Hiring often? The $49/month plan includes unlimited posts.
+                    Your first post is free and goes live after a quick review. Each post after that is {postPrice} and stays live for {postDays} days. {upgradeNote}
                   </div>
                 ) : (
                   <Field label="Status">
@@ -866,7 +900,7 @@ export default function EmployerDashboardPage({
                 <div className="rounded-[26px] border border-amber-400/20 bg-amber-400/10 p-4 text-sm text-amber-100">
                   <div className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">Posting rules built into TarboroJobs</div>
                   <ul className="mt-3 space-y-2 text-sm leading-6 text-amber-50/90">
-                    <li>• {payPerPost ? 'Posts stay live for 30 days.' : 'Open jobs auto-expire 14 days after they go live.'}</li>
+                    <li>• {payPerPost ? `Posts stay live for ${postDays} days.` : 'Open jobs auto-expire 14 days after they go live.'}</li>
                     <li>• Do not post discriminatory language about age, sex, religion, disability, pregnancy, citizenship status, or national origin.</li>
                     <li>• Do not ask applicants for money, bank details, Social Security numbers, Telegram/WhatsApp contact, or crypto payments in the posting.</li>
                     <li>• TarboroJobs may remove or reject listings that break these rules.</li>
@@ -883,7 +917,7 @@ export default function EmployerDashboardPage({
                     required
                   />
                   <span className="leading-6">
-                    I certify this posting is accurate, lawful, non-discriminatory, and does not request money or sensitive financial/personal information from applicants. I understand open jobs expire after 14 days and TarboroJobs may remove listings that violate these rules.
+                    I certify this posting is accurate, lawful, non-discriminatory, and does not request money or sensitive financial/personal information from applicants. I understand open jobs expire after {liveDays} days and TarboroJobs may remove listings that violate these rules.
                   </span>
                 </label>
 
@@ -907,7 +941,7 @@ export default function EmployerDashboardPage({
             </section>
 
             <section className={panelClassName()}>
-              <PanelHeader icon={Briefcase} title="My Jobs" subtitle="Track what is live, what expired, and what needs a 14-day renewal." />
+              <PanelHeader icon={Briefcase} title="My Jobs" subtitle={`Track what is live, what expired, and what needs a ${liveDays}-day renewal.`} />
               <div className="space-y-4 p-5">
                 {jobsLoading ? (
                   <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-sm text-slate-400">Loading your jobs...</div>
@@ -996,7 +1030,7 @@ export default function EmployerDashboardPage({
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
                 {payPerPost
-                  ? 'You can see everyone who applied to your posts. Applicant search, filters and the hiring pipeline come with the $49/month plan.'
+                  ? <>You can see everyone who applied to your posts. {upgradeNote}</>
                   : showingReviewedOnly
                   ? 'Showing only candidates currently in the Reviewed stage.'
                   : 'Submitted resumes may be viewed by active employers on TarboroJobs.com. Use the hiring pipeline below to sort applicants by stage.'}
@@ -1067,7 +1101,16 @@ export default function EmployerDashboardPage({
                   {resumesLoading ? (
                     <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center text-sm text-slate-400">Loading resumes...</div>
                   ) : employerResumes.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center text-sm text-slate-400">{showingReviewedOnly ? 'No reviewed candidates found.' : 'No resumes found.'}</div>
+                    <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center text-sm text-slate-400">
+                      {showingReviewedOnly ? 'No reviewed candidates found.' : 'No resumes found.'}
+                      {showingReviewedOnly ? null : (
+                        <div className="mt-3">
+                          <button type="button" onClick={() => setActiveSection('jobs')} className="inline-flex items-center gap-2 rounded-2xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300">
+                            <PlusCircle className="h-4 w-4" /> Post a job
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   ) : (
                     employerResumes.map((resume) => {
                       const active = selectedResume?.id === resume.id
@@ -1163,16 +1206,16 @@ export default function EmployerDashboardPage({
                               <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400"><ShieldCheck className="h-4 w-4" /> ATS Review</div>
                               <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-4 text-sm leading-6 text-slate-300">
                                 {selectedResume.ats_summary ? <p>{selectedResume.ats_summary}</p> : null}
-                                {selectedResume.ats_keywords_matched?.length ? <p><span className="font-semibold text-white">Matched:</span> {selectedResume.ats_keywords_matched.join(', ')}</p> : null}
-                                {selectedResume.ats_keywords_missing?.length ? <p><span className="font-semibold text-white">Missing:</span> {selectedResume.ats_keywords_missing.join(', ')}</p> : null}
+                                {!selectedResume.ats_summary && selectedResume.ats_keywords_matched?.length ? <p><span className="font-semibold text-white">Matched:</span> {selectedResume.ats_keywords_matched.join(', ')}</p> : null}
+                                {!selectedResume.ats_summary && selectedResume.ats_keywords_missing?.length ? <p><span className="font-semibold text-white">Missing:</span> {selectedResume.ats_keywords_missing.join(', ')}</p> : null}
                               </div>
                             </div>
                           ) : null}
 
                           {selectedResume.resume_text ? (
                             <div>
-                              <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400"><FileBadge className="h-4 w-4" /> Resume Summary</div>
-                              <p className="rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-4 text-sm leading-6 text-slate-300">{selectedResume.resume_text}</p>
+                              <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400"><FileBadge className="h-4 w-4" /> Resume text</div>
+                              <p className="max-h-96 overflow-y-auto whitespace-pre-line rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-4 text-sm leading-6 text-slate-300">{cleanResumeText(selectedResume.resume_text)}</p>
                             </div>
                           ) : null}
 
@@ -1302,7 +1345,7 @@ export default function EmployerDashboardPage({
               <section className={panelClassName()}>
                 <PanelHeader icon={ShieldCheck} title="Account Status" subtitle="Subscription and access details in one clean card." />
                 <div className="space-y-3 p-5 text-sm text-slate-300">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Plan:</span> {payPerPost ? 'Pay per post ($29 a post)' : 'Monthly plan'}</div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Plan:</span> {payPerPost ? `Pay per post (${postPrice} a post)` : 'Monthly plan'}</div>
                   {payPerPost ? null : <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Subscription Status:</span> {employer?.subscription_status || '—'}</div>}
                   <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Access Status:</span> {employer?.access_status || '—'}</div>
                   <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3"><span className="font-semibold text-white">Hiring Status:</span> {employer?.status === 'active' ? 'Hiring' : 'Not hiring'}</div>

@@ -103,6 +103,31 @@ export function EmployerSignupForm({ Field, Input }) {
   )
 }
 
+// Shown under the sign-in error "Please confirm your email first".
+export function ResendConfirmation({ email }) {
+  const [state, setState] = useState('idle')
+  async function resend() {
+    setState('sending')
+    try {
+      const base = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
+      const response = await fetch(`${base}/employer/resend-verification`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      })
+      setState(response.ok ? 'sent' : 'error')
+    } catch {
+      setState('error')
+    }
+  }
+  if (state === 'sent') return <p className="text-sm text-emerald-300">Sent — check your inbox.</p>
+  return (
+    <button type="button" disabled={state === 'sending' || !email} onClick={resend} className="text-sm font-medium text-cyan-300 hover:underline disabled:opacity-60">
+      {state === 'error' ? 'Could not send. Try again' : 'Resend confirmation email'}
+    </button>
+  )
+}
+
 function LandingCard({ icon: Icon, title, children }) {
   return (
     <div className="mx-auto max-w-xl rounded-[30px] border border-slate-800 bg-slate-900/90 p-6 text-slate-300 shadow-[0_18px_60px_rgba(2,6,23,0.24)]">
@@ -138,7 +163,7 @@ export function EmployerVerifyPage({ onVerified, setCurrentPage }) {
     <LandingCard icon={state.status === 'error' ? RefreshCw : MailCheck} title={state.status === 'error' ? 'Link not valid' : 'Email confirmation'}>
       <p>{state.message}</p>
       {state.status === 'done' ? (
-        <button type="button" className={buttonClass} onClick={() => setCurrentPage('employer-dashboard')}>Post your free job</button>
+        <button type="button" className={buttonClass} onClick={() => { window.history.replaceState({}, '', '/?tab=jobs'); setCurrentPage('employer-dashboard') }}>Post your free job</button>
       ) : null}
       {state.status === 'error' ? (
         <button type="button" className={buttonClass} onClick={() => setCurrentPage('list-business')}>Sign up again</button>

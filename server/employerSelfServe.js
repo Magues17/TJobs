@@ -54,7 +54,7 @@ export function resolvePayPerPostStatus(currentStatus, requestedStatus) {
   return {
     error:
       requested === 'open'
-        ? 'Pay-per-post jobs go live after review or payment. Use "Pay $29 to publish" or "Repost for $29" in My Jobs.'
+        ? `Pay-per-post jobs go live after review or payment. Use "Pay $${JOB_POST_PRICE_CENTS / 100} to publish" or "Repost for $${JOB_POST_PRICE_CENTS / 100}" in My Jobs.`
         : 'That status change is not available for this job.',
   }
 }
@@ -363,6 +363,42 @@ export function registerEmployerSelfServe({
       handleSignup({ businessName, contactName, email, phone, website, passwordHash }).catch((error) =>
         console.error('POST /api/employer-auth/signup error:', error)
       )
+    }
+  )
+
+  // Always the same reply: it never says whether the email has an account.
+  app.post(
+    '/api/employer/resend-verification',
+    rateLimitByIp(consumeSignupRate, 'Too many attempts. Please try again later.'),
+    (req, res) => {
+      const email = normalizeEmail(req.body.email)
+      res.json({ success: true })
+      if (!isValidEmail(email)) return
+      pool
+        .query(
+          `
+          SELECT eu.id AS user_id, e.id AS employer_id, e.business_name
+          FROM employer_users eu
+          INNER JOIN employers e ON e.id = eu.employer_id
+          WHERE LOWER(eu.email) = ? AND e.plan = 'pay_per_post' AND e.access_status = 'pending' AND e.onboarding_completed = 0
+          LIMIT 1
+          `,
+          [email]
+        )
+        .then(([rows]) => {
+          if (!rows.length) return
+          return sendVerificationEmail({
+            email,
+            employerId: rows[0].employer_id,
+            employerUserId: rows[0].user_id,
+            lines: [
+              `Hi ${rows[0].business_name || 'there'},`,
+              '',
+              'Here is a new link to confirm your TarboroJobs employer account. It expires in 48 hours.',
+            ],
+          })
+        })
+        .catch((error) => console.error('POST /api/employer/resend-verification error:', error))
     }
   )
 
