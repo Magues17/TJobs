@@ -43,6 +43,13 @@ function dates(job) {
   return job.from || job.to
 }
 
+// 10-digit US numbers read as (252) 555-0100; anything else is left as typed.
+export function formatPhone(value) {
+  const digits = String(value ?? '').replace(/\D/g, '')
+  const ten = digits.length === 11 && digits[0] === '1' ? digits.slice(1) : digits
+  return ten.length === 10 ? `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}` : String(value ?? '').trim()
+}
+
 export function buildResumeText(data) {
   const d = cleanResumeData(data)
   const out = []
@@ -51,7 +58,7 @@ export function buildResumeText(data) {
   }
 
   out.push((d.name || 'Your name').toUpperCase())
-  const contact = [d.phone, d.email, d.town].filter(Boolean).join(' \u00b7 ')
+  const contact = [formatPhone(d.phone), d.email, d.town].filter(Boolean).join(' \u00b7 ')
   if (contact) out.push(contact)
 
   const looking = [d.workType, JOB_TYPE_WORDS[d.jobType]].filter(Boolean).join(', ')

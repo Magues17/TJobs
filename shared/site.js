@@ -8,6 +8,8 @@ export const SITE = {
   // "near you" tiers: 0 = home town(s), 1 = same county / 10 min, 2 = commute, 3 = far
   towns: { Tarboro: 0, Princeville: 0, Pinetops: 1, Conetoe: 1, Leggett: 1, Speed: 1, Macclesfield: 1, Battleboro: 1, Whitakers: 1, 'Rocky Mount': 2, Wilson: 2, Greenville: 3 },
   farTier: 3, // unknown towns
+  // ZIPs for scraped HTML sources that show only a ZIP: Tarboro, Rocky Mount x3, Pinetops, Wilson, Greenville, Nashville, Elm City, Conetoe.
+  zips: ['27886', '27801', '27803', '27804', '27864', '27893', '27834', '27856', '27822', '27819'],
   // Shown after the city on the job page, by tier.
   tierWords: { 0: '', 1: 'near Tarboro', 2: 'commute', 3: '45+ min' },
   // Home-page "What kind of work?" chips: [label, industries]. Industry values must match

@@ -1,7 +1,11 @@
 // server/jobScraper.js
 // Scrapes Edgecombe County, Tarboro, USAJOBS, ECU Health (Tarboro), Edgecombe County
-// Public Schools, ABB (Pinetops) and the Town of Pinetops, and upserts into job_posts.
+// Public Schools, ABB (Pinetops), the Town of Pinetops and the nearby retail / food / warehouse
+// chains (Dollar General, Dollar Tree, Family Dollar, Lowe's, CVS, Walgreens, Tractor Supply,
+// Sheetz, Hardee's, Pfizer Rocky Mount), and upserts into job_posts.
+// `node server/jobScraper.js --dry-run <source>` fetches one source without a database.
 import { deepStrictEqual as assertDeepStrictEqual } from 'node:assert'
+import { SITE } from '../shared/site.js'
 
 // Values must come from the site's filter list (src/App.jsx `industries`).
 const INDUSTRY_RULES = [
@@ -19,13 +23,66 @@ function mapIndustry(title, fallback = 'Government') {
 const USER_AGENT = 'TarboroJobs/1.0 (+https://tarborojobs.com)'
 
 async function fetchOk(url, opts = {}) {
-  const res = await fetch(url, {
+  const go = () => fetch(url, {
     ...opts,
     headers: { 'User-Agent': USER_AGENT, ...opts.headers },
     signal: AbortSignal.timeout(30000),
   })
+  const res = await go().catch(() => go()) // one retry on a network error or timeout
   if (!res.ok) throw new Error(`${new URL(url).host} fetch failed: ${res.status}`)
   return res
+}
+
+// Chain-employer sources send a browser-like User-Agent; the first set of sources keeps the honest one.
+const WEB = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+  'Accept-Language': 'en-US,en;q=0.9',
+}
+const WEB_JSON = { ...WEB, Accept: 'application/json' }
+const WEB_HTML = { ...WEB, Accept: 'text/html' }
+const JSON_POST = { ...WEB_JSON, 'Content-Type': 'application/json' }
+
+// Chain sources keep only SITE.towns (case-insensitive); HTML sources that only show a ZIP use SITE.zips.
+const TOWNS = Object.keys(SITE.towns)
+const townOf = name => TOWNS.find(t => t.toLowerCase() === String(name ?? '').trim().toLowerCase())
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+// Store jobs are 'Retail' / 'Food Service' / 'Manufacturing'; only pharmacist, pharmacy tech/intern and nurse titles are Healthcare.
+function chainIndustry(title, fallback) {
+  return /\b(pharmacist|pharmacy (tech|technician|intern)|pharm tech|nurse|lpn)\b/i.test(title) ? 'Healthcare' : fallback
+}
+
+// One normalized job for the chain sources. Never leaves the description empty or a bare URL.
+function chainJob({ title, company, city, industry, source, id, url, desc, type = '', payText }) {
+  return {
+    job_title: title,
+    company,
+    city,
+    industry: chainIndustry(title, industry),
+    employment_type: inferEmploymentType(`${title} ${type}`, desc ?? ''),
+    source,
+    external_id: String(id).slice(0, 191),
+    source_url: url,
+    job_description: desc || `${title} at ${company} in ${city}, NC. Apply on ${company}'s site.`,
+    expires_at: null,
+    ...parsePay(payText ?? desc),
+  }
+}
+
+// An empty result throws, so runAllScrapers skips "close missing" for that source on a bad day.
+function finish(source, jobs, partial) {
+  if (!jobs.length) throw new Error(`${source}: no jobs returned; the source may have changed`)
+  jobs.partial = partial
+  return jobs
+}
+
+if (process.argv[1]?.endsWith('jobScraper.js') && process.argv.includes('--self-test')) {
+  assertDeepStrictEqual(
+    ['Pharmacy Cashier', 'Certified Pharmacy Technician', 'Pharmacist-Sign-On Bonus', 'Shift Lead'].map(t => chainIndustry(t, 'Retail')),
+    ['Retail', 'Healthcare', 'Healthcare', 'Retail']
+  )
+  assertDeepStrictEqual([townOf(' GREENVILLE '), townOf('Nashville')], ['Greenville', undefined])
+  console.log('jobScraper chain self-test ok')
 }
 
 // Rich-text HTML (ATS job descriptions) to plain text that keeps paragraphs and bullets.
@@ -356,27 +413,41 @@ const USAJOBS_PAY_TYPES = { PA: 'salary', PH: 'hourly', PD: 'daily', PW: 'weekly
 // The search page loads its results from POST /widgets (robots.txt only blocks
 // /px-widgets); each job page embeds the full posting in `phApp.ddo`.
 
-async function scrapePhenom({ host, lang, country, path, city, source, company, industry }) {
+async function scrapePhenom({ host, lang, country, path, city, source, company, industry, state, headers = { 'Content-Type': 'application/json' } }) {
+  // `city` is one town or a list; `state` (chain sites) also filters on the posting's own city/state fields.
+  const cities = [].concat(city)
   const res = await fetchOk(`https://${host}/widgets`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
       lang, country, deviceType: 'desktop', pageName: 'search-results', ddoKey: 'refineSearch',
       from: 0, size: 50, jobs: true, counts: false, all_fields: ['city'], clearAll: false,
       jdsource: 'facets', pageId: 'page20', siteType: 'external', keywords: '', global: true,
-      selected_fields: { city: [city] }, locationData: {},
+      selected_fields: { ...(state && { state: [state] }), city: cities }, locationData: {},
     }),
   })
   const search = (await res.json())?.refineSearch
   const list = search?.data?.jobs
   if (search?.status !== 200 || !Array.isArray(list)) throw new Error(`${source}: search response not understood`)
-  if (!list.length) throw new Error(`${source}: no ${city} jobs returned; the city filter may have changed`)
+  if (!list.length) throw new Error(`${source}: no ${cities.join('/')} jobs returned; the city filter may have changed`)
 
   const jobs = []
   for (const j of list) {
     // Strict: the posting itself must name the town (multi-site postings included).
-    if (!j.jobId || !j.title || !(j.multi_location ?? [j.location]).some(l => String(l).startsWith(`${city},`))) continue
-    const source_url = `https://${host}${path}/job/${encodeURIComponent(j.jobId)}`
+    const jobCity = state
+      ? j.state === state ? townOf(j.city) : undefined
+      : cities.find(c => (j.multi_location ?? [j.location]).some(l => String(l).startsWith(`${c},`)))
+    if (!j.jobId || !j.title || !jobCity) continue
+    const jobPage = `https://${host}${path}/job/${encodeURIComponent(j.jobId)}`
+    if (state) { // chain sites: the search teaser is the description (no page fetch per job)
+      jobs.push(chainJob({
+        title: j.title, company, city: jobCity, industry, source, id: j.jobId,
+        url: j.applyUrl?.replace(/\/apply$/, '') || jobPage,
+        desc: j.descriptionTeaser, type: `${j.hiringType ?? ''} ${j.type ?? ''}`, payText: j.salaryRange,
+      }))
+      continue
+    }
+    const source_url = jobPage
     let job_description = null
     try {
       const page = await (await fetchOk(source_url)).text()
@@ -386,7 +457,7 @@ async function scrapePhenom({ host, lang, country, path, city, source, company, 
     jobs.push({
       job_title: j.title,
       company: typeof company === 'function' ? company(j) : company,
-      city,
+      city: jobCity,
       industry: mapIndustry(j.title, industry),
       employment_type: inferEmploymentType(`${j.title} ${j.hiringType ?? ''} ${j.type ?? ''}`, job_description ?? ''),
       source,
@@ -500,6 +571,175 @@ export async function scrapePinetops() {
   return addPdfDescriptions(jobs)
 }
 
+// ── Retail, food and warehouse employers near Tarboro ─────────────────────────
+// Entry-level chains for the "Stores & restaurants" chip. Each keeps only SITE.towns
+// (or SITE.zips). A thrown error means runAllScrapers skips "close missing".
+
+function scrapeChainPhenom(host, source, company, industry) {
+  return scrapePhenom({
+    host, lang: 'en_us', country: 'us', path: '/us/en', city: TOWNS, state: 'North Carolina',
+    source, company, industry, headers: JSON_POST,
+  })
+}
+
+// "SALES ASSOCIATE in TARBORO NC S19902" -> "Sales Associate"
+function dollarGeneralTitle(raw) {
+  const t = decodeEntities(String(raw || '')).replace(/\s+in\s+[A-Z .'-]+\s+NC\s+S\d+\s*$/i, '').trim()
+  return t === t.toUpperCase() ? t.toLowerCase().replace(/(^|\s)[a-z]/g, (m) => m.toUpperCase()) : t
+}
+
+export function scrapeDollarTree() {
+  return scrapeChainPhenom('careers.dollartree.com', 'dollar_tree', 'Dollar Tree', 'Retail')
+}
+
+export function scrapeFamilyDollar() {
+  return scrapeChainPhenom('careers.familydollar.com', 'family_dollar', 'Family Dollar', 'Retail')
+}
+
+export function scrapeLowes() {
+  return scrapeChainPhenom('talent.lowes.com', 'lowes', "Lowe's", 'Retail')
+}
+
+export function scrapeCvs() {
+  return scrapeChainPhenom('jobs.cvshealth.com', 'cvs', 'CVS Health', 'Retail')
+}
+
+// Dollar General: Oracle HCM REST, one keyword search per town (the keyword also matches other states).
+export async function scrapeDollarGeneral() {
+  const host = 'https://ibxwjb.fa.ocs.oraclecloud.com'
+  const found = new Map()
+  let partial = false
+  for (const town of TOWNS) {
+    // The keyword also matches other states (Greenville is hundreds of rows), so page: 50 a time, 6 pages max.
+    for (let offset = 0; ; offset += 50) {
+      const finder = `findReqs;siteNumber=CX_1001,limit=50,offset=${offset},keyword=%22${encodeURIComponent(town)}%22`
+      // expand= is required: without it the response has facets but no requisitionList.
+      const data = await (await fetchOk(`${host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&expand=requisitionList.secondaryLocations&finder=${finder}`, { headers: WEB_JSON })).json()
+      if (!Array.isArray(data?.items)) throw new Error('dollar_general: search response not understood')
+      for (const r of data.items[0]?.requisitionList ?? []) {
+        const city = townOf(/^([^,]+), NC,/.exec(r.PrimaryLocation ?? '')?.[1])
+        if (!city || !r.Id || !r.Title || found.has(String(r.Id))) continue
+        found.set(String(r.Id), chainJob({
+          title: dollarGeneralTitle(r.Title), company: 'Dollar General', city, industry: 'Retail', source: 'dollar_general',
+          id: r.Id, url: `${host}/hcmUI/CandidateExperience/en/sites/CX_1001/job/${r.Id}`, desc: r.ShortDescriptionStr || null,
+        }))
+      }
+      const total = data.items[0]?.TotalJobsCount ?? 0
+      if (offset + 50 >= total) break
+      if (offset >= 250) { partial = true; break }
+      await sleep(300)
+    }
+    await sleep(300)
+  }
+  return finish('dollar_general', [...found.values()], partial)
+}
+
+// Walgreens: server-rendered list, 15 per page; location is "City, North Carolina".
+export async function scrapeWalgreens() {
+  const host = 'https://jobs.walgreens.com'
+  const found = new Map()
+  let pages = 1
+  for (let p = 1; p <= pages && p <= 5; p++) {
+    const html = await (await fetchOk(`${host}/en/search-jobs/Tarboro%2C%20NC/1242/4/6252001/35.8968/-77.5358/25/2?p=${p}`, { headers: WEB_HTML })).text()
+    if (!html.includes('id="search-results-list"')) throw new Error('walgreens: results list not found; page layout may have changed')
+    pages = Number(html.match(/data-total-pages="(\d+)"/)?.[1] ?? 1)
+    for (const m of html.matchAll(/<a href="([^"]+)" data-job-id="(\d+)">\s*<h2[^>]*>([\s\S]*?)<\/h2>\s*<span class="job-location">([^<]*)<\/span>/g)) {
+      const city = townOf(decodeEntities(m[4]).split(',')[0])
+      const title = stripTags(m[3])
+      if (!city || !title || found.has(m[2])) continue
+      found.set(m[2], chainJob({ title, company: 'Walgreens', city, industry: 'Retail', source: 'walgreens', id: m[2], url: new URL(m[1], host).href }))
+    }
+    if (p < pages) await sleep(300)
+  }
+  return finish('walgreens', [...found.values()], pages > 5)
+}
+
+// Tractor Supply: 25 rows a page for the whole state (not ordered by distance), so walk the
+// pages and keep SITE.zips. Rows carry only "City, NC, US, ZIP".
+export async function scrapeTractorSupply() {
+  const host = 'https://www.tractorsupply.careers'
+  const found = new Map()
+  let total = 1
+  for (let row = 0; row < total && row < 25 * 16; row += 25) {
+    const html = await (await fetchOk(`${host}/search/?q=&locationsearch=Tarboro%2C+NC&startrow=${row}`, { headers: WEB_HTML })).text()
+    total = Number(html.match(/of <b>(\d+)<\/b>/)?.[1] ?? 0)
+    if (!total) throw new Error('tractor_supply: result count not found; page layout may have changed')
+    for (const tr of html.split('<tr class="data-row">').slice(1)) {
+      const a = /<a href="(\/job\/[^"]+\/(\d+)\/)" class="jobTitle-link">([^<]*)<\/a>/.exec(tr)
+      const loc = /<span class="jobLocation">\s*([^<]*?)\s*<\/span>/.exec(tr)?.[1].split(',').map(s => s.trim())
+      if (!a || !loc || !SITE.zips.includes(loc[loc.length - 1]) || found.has(a[2])) continue
+      found.set(a[2], chainJob({
+        title: decodeEntities(a[3]).trim(), company: 'Tractor Supply', city: townOf(loc[0]) ?? loc[0], industry: 'Retail',
+        source: 'tractor_supply', id: a[2], url: new URL(a[1], host).href,
+      }))
+    }
+    await sleep(300)
+  }
+  return finish('tractor_supply', [...found.values()], total > 25 * 16)
+}
+
+// Sheetz: JSON search near Tarboro; city arrives upper-case ("GREENVILLE").
+export async function scrapeSheetz() {
+  const found = new Map()
+  let partial = false
+  for (let page = 1; ; page++) {
+    const data = await (await fetchOk(`https://jobs.sheetz.com/api/jobs?location=Tarboro%2C%20NC&page=${page}`, { headers: WEB_JSON })).json()
+    if (!Array.isArray(data?.jobs)) throw new Error('sheetz: search response not understood')
+    for (const { data: d } of data.jobs) {
+      const city = d?.state === 'North Carolina' ? townOf(d.city) : undefined
+      if (!city || !d.req_id || !d.title || found.has(d.req_id)) continue
+      found.set(d.req_id, chainJob({
+        title: d.title, company: 'Sheetz', city, industry: (d.categories ?? []).some(c => c.name === 'Food Service') ? 'Food Service' : 'Retail',
+        source: 'sheetz', id: d.req_id, url: d.apply_url || `https://jobs.sheetz.com/jobs/${d.slug}`,
+        desc: htmlToText(d.description ?? ''), type: (d.tags1 ?? []).join(' '), payText: (d.tags4 ?? []).join(' '),
+      }))
+    }
+    if (!data.jobs.length || page * data.jobs.length >= data.totalCount) break
+    if (page >= 5) { partial = true; break }
+    await sleep(300)
+  }
+  return finish('sheetz', [...found.values()], partial)
+}
+
+// Workday career sites: POST /wday/cxs/<tenant>/<site>/jobs per search term, then the posting's detail JSON.
+// locationsText is not always a city ("Hardees of Tarboro"), so a hit must name the town in title or location.
+async function scrapeWorkday({ host, tenant, site, towns, source, company, industry }) {
+  const api = `https://${host}/wday/cxs/${tenant}/${site}`
+  const found = new Map()
+  let partial = false
+  for (const town of towns) {
+    let total = 0
+    for (let offset = 0; ; offset += 20) {
+      const res = await fetchOk(`${api}/jobs`, { method: 'POST', headers: JSON_POST, body: JSON.stringify({ searchText: town, limit: 20, offset, appliedFacets: {} }) })
+      const data = await res.json()
+      if (!Array.isArray(data?.jobPostings)) throw new Error(`${source}: search response not understood`)
+      if (!offset) total = data.total // later pages report 0
+      for (const p of data.jobPostings) {
+        const id = String(p.externalPath ?? '').split('/').pop()
+        if (!id || !p.title || found.has(id) || !`${p.title} ${p.locationsText}`.toLowerCase().includes(town.toLowerCase())) continue
+        let info = null
+        try { info = (await (await fetchOk(`${api}${p.externalPath}`, { headers: WEB_JSON })).json())?.jobPostingInfo ?? null } catch { /* keep the listing without details */ }
+        found.set(id, chainJob({
+          title: p.title, company, city: town, industry, source, id,
+          url: `https://${host}/en-US/${site}${p.externalPath}`, desc: htmlToText(info?.jobDescription ?? ''), type: info?.timeType ?? '',
+        }))
+      }
+      if (offset + 20 >= total) break
+      if (offset >= 80) { partial = true; break }
+    }
+    await sleep(300)
+  }
+  return finish(source, [...found.values()], partial)
+}
+
+export function scrapeHardees() {
+  return scrapeWorkday({ host: 'bne.wd1.myworkdayjobs.com', tenant: 'bne', site: 'Hardees', towns: TOWNS, source: 'hardees', company: "Hardee's", industry: 'Food Service' })
+}
+
+export function scrapePfizerRockyMount() {
+  return scrapeWorkday({ host: 'pfizer.wd1.myworkdayjobs.com', tenant: 'pfizer', site: 'PfizerCareers', towns: ['Rocky Mount'], source: 'pfizer_rm', company: 'Pfizer Rocky Mount', industry: 'Manufacturing' })
+}
+
 // ── Upsert helper ─────────────────────────────────────────────────────────────
 
 const UPSERT_SQL = `
@@ -577,17 +817,27 @@ async function upsertJob(pool, job, employerId) {
 
 // ── Main entry ────────────────────────────────────────────────────────────────
 
-export async function runAllScrapers(pool) {
-  const scrapers = [
-    { name: 'edgecombe_county', fn: scrapeEdgecombeCounty },
-    { name: 'tarboro', fn: scrapeTarboro },
-    { name: 'usajobs', fn: fetchUSAJOBS },
-    { name: 'ecu_health', fn: scrapeEcuHealth },
-    { name: 'ecps', fn: scrapeEcps },
-    { name: 'abb', fn: scrapeAbbPinetops },
-    { name: 'pinetops', fn: scrapePinetops },
-  ]
+const SCRAPERS = [
+  { name: 'edgecombe_county', fn: scrapeEdgecombeCounty },
+  { name: 'tarboro', fn: scrapeTarboro },
+  { name: 'usajobs', fn: fetchUSAJOBS },
+  { name: 'ecu_health', fn: scrapeEcuHealth },
+  { name: 'ecps', fn: scrapeEcps },
+  { name: 'abb', fn: scrapeAbbPinetops },
+  { name: 'pinetops', fn: scrapePinetops },
+  { name: 'dollar_general', fn: scrapeDollarGeneral },
+  { name: 'dollar_tree', fn: scrapeDollarTree },
+  { name: 'family_dollar', fn: scrapeFamilyDollar },
+  { name: 'lowes', fn: scrapeLowes },
+  { name: 'cvs', fn: scrapeCvs },
+  { name: 'walgreens', fn: scrapeWalgreens },
+  { name: 'tractor_supply', fn: scrapeTractorSupply },
+  { name: 'sheetz', fn: scrapeSheetz },
+  { name: 'hardees', fn: scrapeHardees },
+  { name: 'pfizer_rm', fn: scrapePfizerRockyMount },
+]
 
+export async function runAllScrapers(pool) {
   let imported = 0
   let updated = 0
   let closed = 0
@@ -599,7 +849,7 @@ export async function runAllScrapers(pool) {
     .query(`UPDATE job_posts SET expires_at = updated_at + INTERVAL 14 DAY, updated_at = updated_at WHERE source IS NOT NULL AND status = 'open' AND expires_at IS NULL`)
     .catch((err) => errors.push({ source: 'backfill', error: err.message }))
 
-  for (const { name, fn } of scrapers) {
+  for (const { name, fn } of SCRAPERS) {
     let jobs
     try {
       jobs = await fn()
@@ -633,4 +883,24 @@ export async function runAllScrapers(pool) {
   }
 
   return { imported, updated, closed, errors }
+}
+
+// `node server/jobScraper.js --dry-run <source>`: one source's fetch + normalize, no database.
+const dryRun = process.argv.indexOf('--dry-run')
+if (process.argv[1]?.endsWith('jobScraper.js') && dryRun !== -1) {
+  const entry = SCRAPERS.find(s => s.name === process.argv[dryRun + 1])
+  if (!entry) {
+    console.error(`unknown source; one of: ${SCRAPERS.map(s => s.name).join(', ')}`)
+    process.exit(1)
+  }
+  entry.fn().then(
+    jobs => {
+      console.log(`count ${jobs.length} partial ${Boolean(jobs.partial)}`)
+      console.log(JSON.stringify(jobs.slice(0, 3), null, 2))
+    },
+    err => {
+      console.error(`error: ${err.message}`)
+      process.exit(1)
+    }
+  )
 }
