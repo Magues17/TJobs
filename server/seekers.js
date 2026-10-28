@@ -21,10 +21,12 @@ import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
 import jwt from 'jsonwebtoken'
+import { buildResumeText, cleanResumeData } from '../shared/resumeText.js'
 
 export const SEEKER_AUDIENCE = 'tarborojobs:seeker'
 const LOGIN_TOKEN_TTL_MS = 15 * 60 * 1000
 const SESSION_TTL = '30d'
+const RESUME_DATA_MAX_BYTES = 20 * 1024
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/
 const GENERIC_LOGIN_RESPONSE = {
   success: true,
@@ -127,6 +129,14 @@ export function register({
         PRIMARY KEY (seeker_id, job_post_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `)
+    // Free resume builder: the answers as JSON (parsed or text depending on the server).
+    for (const [column, type] of [['resume_data', 'JSON NULL'], ['resume_built_at', 'DATETIME NULL']]) {
+      try {
+        await pool.query(`ALTER TABLE job_seeker_accounts ADD COLUMN ${column} ${type}`)
+      } catch (error) {
+        if (error?.code !== 'ER_DUP_FIELDNAME') throw error
+      }
+    }
     // One row per one-click apply; the primary key stops a double submit from
     // creating two applications. job_seeker_id is the application it created.
     await pool.query(`
@@ -172,6 +182,34 @@ export function register({
     }
   }
 
+  // JSON columns arrive parsed on MySQL and as text on MariaDB.
+  function builtResume(row) {
+    try {
+      return row.resume_data ? cleanResumeData(typeof row.resume_data === 'string' ? JSON.parse(row.resume_data) : row.resume_data) : null
+    } catch {
+      return null
+    }
+  }
+
+  // null when the body is not a usable resume object.
+  function parseResumeBody(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+    if (JSON.stringify(data).length > RESUME_DATA_MAX_BYTES) return null
+    return cleanResumeData(data)
+  }
+
+  // Saves the built resume and fills empty profile fields from it.
+  async function saveBuiltResume(id, resume) {
+    await pool.query(
+      `UPDATE job_seeker_accounts SET resume_data = ?, resume_built_at = ?,
+         full_name = COALESCE(NULLIF(full_name, ''), ?), phone = COALESCE(NULLIF(phone, ''), ?),
+         town = COALESCE(NULLIF(town, ''), ?), desired_job_title = COALESCE(NULLIF(desired_job_title, ''), ?),
+         summary = COALESCE(NULLIF(summary, ''), ?)
+       WHERE id = ?`,
+      [JSON.stringify(resume), clock(), resume.name || null, resume.phone || null, resume.town || null, resume.workType || null, buildResumeText(resume).slice(0, 2000), id]
+    )
+  }
+
   function publicProfile(row) {
     return {
       email: row.email,
@@ -181,12 +219,13 @@ export function register({
       desired_job_title: row.desired_job_title || '',
       summary: row.summary || '',
       has_resume: !!row.resume_file_url,
+      has_built_resume: !!row.resume_data,
       resume_file_name: row.resume_file_url ? row.resume_file_name || 'resume.pdf' : null,
       resume_uploaded_at: row.resume_uploaded_at || null,
     }
   }
 
-  async function sendLoginLink(email, token) {
+  async function sendLoginLink(email, token, { subject = 'Your TarboroJobs sign-in link', heading = 'Sign in to TarboroJobs', intro = 'Sign in to TarboroJobs:' } = {}) {
     const transporter = getMailer()
     if (!transporter || !base) {
       console.error('[seekers] sign-in email not sent; mail or APP_BASE_URL is not configured.')
@@ -197,11 +236,11 @@ export function register({
     await transporter.sendMail({
       from: getMailFrom(),
       to: email,
-      subject: 'Your TarboroJobs sign-in link',
-      text: ['Sign in to TarboroJobs:', url, '', 'This link works once and expires in 15 minutes.', '', reason].join('\n'),
+      subject,
+      text: [intro, url, '', 'This link works once and expires in 15 minutes.', '', reason].join('\n'),
       html: `<!doctype html><html><body style="margin:0;padding:0;background:#f8fafc">
 <div style="max-width:600px;margin:0 auto;padding:20px 16px;font-family:Arial,Helvetica,sans-serif;color:#0f172a">
-<h1 style="font-size:20px;margin:0 0 12px">Sign in to TarboroJobs</h1>
+<h1 style="font-size:20px;margin:0 0 12px">${escapeHtml(heading)}</h1>
 <p><a href="${escapeHtml(url)}" style="display:inline-block;background:#22d3ee;color:#020617;font-weight:bold;text-decoration:none;padding:12px 20px;border-radius:12px">Sign in</a></p>
 <p style="font-size:13px;color:#475569">This link works once and expires in 15 minutes.</p>
 <p style="font-size:12px;color:#64748b">${escapeHtml(reason)}</p>
@@ -228,6 +267,54 @@ export function register({
     } catch (error) {
       console.error('POST /api/seeker/login error:', error)
       res.status(500).json({ success: false, error: 'Could not send a sign-in link. Please try again.' })
+    }
+  })
+
+  // Free resume builder, no sign-in: saves the answers to the account for this
+  // address (made if new) and mails the sign-in link. The answer never reveals
+  // whether the account existed. An account that has already signed in is the
+  // owner's, so a stranger typing its address cannot overwrite it; that owner
+  // updates through PUT /api/seeker/resume-builder instead.
+  app.post('/api/seeker/resume-builder/save', limit(consumeLoginIp, 'Too many requests. Please try again later.'), async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase().slice(0, 255)
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ success: false, error: 'Enter a valid email address.' })
+    }
+    const resume = parseResumeBody(req.body?.data)
+    if (!resume) return res.status(400).json({ success: false, error: 'Your resume could not be saved. Please try again.' })
+    try {
+      await pool.query('INSERT IGNORE INTO job_seeker_accounts (email, created_at) VALUES (?, ?)', [email, clock()])
+      const [accounts] = await pool.query('SELECT id, last_login_at FROM job_seeker_accounts WHERE LOWER(email) = ? LIMIT 1', [email])
+      if (!accounts.length) throw new Error('account row missing after insert')
+      if (!accounts[0].last_login_at) await saveBuiltResume(accounts[0].id, resume)
+      if (consumeLoginEmail(email)) {
+        const token = crypto.randomBytes(32).toString('base64url')
+        await pool.query(
+          'INSERT INTO seeker_login_tokens (email, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)',
+          [email, sha256(token), new Date(clock().getTime() + LOGIN_TOKEN_TTL_MS), clock()]
+        )
+        sendLoginLink(email, token, {
+          subject: 'Your TarboroJobs resume is saved',
+          heading: 'Your resume is saved',
+          intro: 'Your TarboroJobs resume is saved to your account. Use this link to sign in and see it:',
+        }).catch((error) => console.error('[seekers] resume email failed:', error?.message || error))
+      }
+      res.json({ success: true })
+    } catch (error) {
+      console.error('POST /api/seeker/resume-builder/save error:', error)
+      res.status(500).json({ success: false, error: 'Could not save your resume. Please try again.' })
+    }
+  })
+
+  app.put('/api/seeker/resume-builder', requireSeeker, async (req, res) => {
+    const resume = parseResumeBody(req.body?.data)
+    if (!resume) return res.status(400).json({ success: false, error: 'Your resume could not be saved. Please try again.' })
+    try {
+      await saveBuiltResume(req.seeker.id, resume)
+      res.json({ success: true })
+    } catch (error) {
+      console.error('PUT /api/seeker/resume-builder error:', error)
+      res.status(500).json({ success: false, error: 'Could not save your resume.' })
     }
   })
 
@@ -268,6 +355,8 @@ export function register({
       res.json({
         success: true,
         profile: publicProfile(req.seeker),
+        resume_data: builtResume(req.seeker),
+        has_built_resume: !!req.seeker.resume_data,
         saved_job_ids: saved.map((row) => Number(row.job_post_id)),
         applied_job_ids: applied.map((row) => Number(row.job_post_id)),
       })
@@ -346,7 +435,9 @@ export function register({
     const jobId = Number(req.params.jobId)
     if (!jobId) return res.status(400).json({ success: false, error: 'A valid job ID is required.' })
     if (!seeker.full_name) return res.status(400).json({ success: false, error: 'Add your name to your profile first.' })
-    if (!seeker.resume_file_url) return res.status(400).json({ success: false, error: 'Upload a resume to your profile first.' })
+    // A resume built on the site stands in for an uploaded file.
+    const built = seeker.resume_file_url ? null : builtResume(seeker)
+    if (!seeker.resume_file_url && !built) return res.status(400).json({ success: false, error: 'Upload a resume to your profile first.' })
 
     let claimed = false
     let copyName = null
@@ -373,13 +464,17 @@ export function register({
         throw error
       }
 
-      const source = resumePath(seeker.resume_file_url)
-      if (!source || !fs.existsSync(source)) {
-        return res.status(400).json({ success: false, error: 'Your saved resume is missing. Please upload it again.' })
+      let resumeFile = null
+      if (!built) {
+        const source = resumePath(seeker.resume_file_url)
+        if (!source || !fs.existsSync(source)) {
+          return res.status(400).json({ success: false, error: 'Your saved resume is missing. Please upload it again.' })
+        }
+        copyName = newResumeFileName()
+        const copyPath = path.join(resumesDir, copyName)
+        await fs.promises.copyFile(source, copyPath, fs.constants.COPYFILE_EXCL)
+        resumeFile = { path: copyPath, filename: copyName }
       }
-      copyName = newResumeFileName()
-      const copyPath = path.join(resumesDir, copyName)
-      await fs.promises.copyFile(source, copyPath, fs.constants.COPYFILE_EXCL)
 
       const { id } = await createJobApplication(
         job,
@@ -391,9 +486,9 @@ export function register({
           desiredJobTitle: job.job_title,
           employmentType: job.employment_type || 'any',
           skills: null,
-          applicantNote: seeker.summary,
+          applicantNote: built ? buildResumeText(built) : seeker.summary,
         },
-        { path: copyPath, filename: copyName },
+        resumeFile,
         () => { saved = true }
       )
       await pool.query(

@@ -2582,10 +2582,11 @@ app.post('/api/jobposts/:id/apply', discardUploadOnError, upload.single('resume_
 // dashboard lists plus its 'new' candidate action. The guest apply form and
 // job seeker one-click apply (seekers.js) both create applications here, so
 // employers see them the same way. onSaved runs as soon as the row points at
-// the PDF, before anything that could still fail.
+// the PDF, before anything that could still fail. resumeFile is null for a
+// resume built on the site (the text is in applicantNote).
 async function createJobApplication(job, applicant, resumeFile, onSaved = () => {}) {
   const { fullName, email, phone, city, desiredJobTitle, employmentType, skills, applicantNote } = applicant
-  const pdfResumeText = await extractPdfTextFromFile(resumeFile.path)
+  const pdfResumeText = await extractPdfTextFromFile(resumeFile?.path)
   const combinedResumeText = safeTrim(
     [applicantNote, pdfResumeText].filter(Boolean).join('\n\n'),
     50000
@@ -2597,7 +2598,7 @@ async function createJobApplication(job, applicant, resumeFile, onSaved = () => 
     resume_text: applicantNote,
     resume_pdf_text: pdfResumeText,
   })
-  const resumeFileUrl = `/uploads/resumes/${resumeFile.filename}`
+  const resumeFileUrl = resumeFile ? `/uploads/resumes/${resumeFile.filename}` : null
 
   const [result] = await pool.query(
     `

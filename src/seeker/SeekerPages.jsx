@@ -479,10 +479,10 @@ export function OneClickApply({ job }) {
 
   if (!profile) return null
 
-  if (!profile.has_resume || !profile.full_name) {
+  if ((!profile.has_resume && !profile.has_built_resume) || !profile.full_name) {
     return (
       <div className={`${frame} flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between`}>
-        <p className="text-sm leading-6 text-slate-300">Add your name and a PDF resume to your profile to apply in one click.</p>
+        <p className="text-sm leading-6 text-slate-300">Add your name and a resume to your profile to apply in one click. No resume? Build one free in 2 minutes.</p>
         <button
           type="button"
           className={`${primaryButton} w-full sm:w-auto`}
@@ -513,7 +513,7 @@ export function OneClickApply({ job }) {
     <div className={frame}>
       <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Fastest way</div>
       <p className="mt-2 text-sm leading-6 text-slate-300">
-        Send {profile.full_name}, {profile.email}{profile.phone ? `, ${profile.phone}` : ''} and your saved resume ({profile.resume_file_name}) to {job.company}.
+        Send {profile.full_name}, {profile.email}{profile.phone ? `, ${profile.phone}` : ''} and your saved resume{profile.resume_file_name ? ` (${profile.resume_file_name})` : ''} to {job.company}.
       </p>
       {error ? <div className="mt-3"><Notice kind="error">{error}</Notice></div> : null}
       <button type="button" onClick={apply} disabled={status === 'sending'} className={`${primaryButton} mt-4 w-full sm:w-auto`}>

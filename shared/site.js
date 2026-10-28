@@ -20,6 +20,16 @@ export const SITE = {
     ['Office & government', ['Government', 'Public Safety', 'Professional Services', 'Information Technology']],
     ['Construction & trades', ['Construction']],
   ],
+  // Free resume builder: tappable skill chips (group -> skills) and certification chips.
+  resumeSkills: {
+    'Hands-on': ['Forklift', 'Pallet jack', 'Machine operation', 'Assembly line', 'Warehouse picking', 'Cleaning / janitorial', 'Landscaping', 'Construction labor', 'Welding'],
+    Service: ['Cash register / POS', 'Customer service', 'Food prep / cooking', 'Serving', 'Stocking', 'Retail sales', 'Housekeeping'],
+    'Care & schools': ['CNA', 'Patient care', 'Childcare', 'Teacher assistant'],
+    Driving: ["Valid driver's license", 'Reliable transportation', 'CDL'],
+    Office: ['Microsoft Office', 'Data entry', 'Phone / front desk', 'Scheduling'],
+    Other: ['Spanish / English bilingual', 'Team leadership', 'Training new hires'],
+  },
+  resumeCerts: ['ServSafe', 'CNA', 'CDL-A', 'CDL-B', 'OSHA 10', 'Forklift certified', 'CPR / First Aid', 'Phlebotomy', 'HVAC', 'Electrical', 'EMT'],
 }
 
 const norm = (value) => String(value ?? '').trim().toLowerCase()

@@ -15,3 +15,31 @@
   flex-shrink: 0;
   white-space: nowrap;
 }
+
+/* Free resume builder: the one light page on the site. */
+.resume-sheet {
+  background: #fff;
+  color: #000;
+  border-radius: 12px;
+  padding: 1.25rem 1rem;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.resume-sheet h2 { margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: 0.02em; }
+.resume-sheet h3 { margin: 1rem 0 0.25rem; padding-bottom: 0.15rem; border-bottom: 1px solid #000; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.08em; }
+.resume-sheet p { margin: 0.15rem 0 0; }
+.resume-sheet .resume-contact { margin-top: 0.25rem; }
+.resume-sheet .resume-detail { padding-left: 1rem; color: #222; }
+.resume-sheet section:first-of-type:not(:has(h3)) { margin-top: 0.9rem; }
+
+@media print {
+  @page { margin: 0.6in; }
+  html, body { background: #fff !important; }
+  /* Hide everything except the sheet and the elements that contain it. */
+  body :not(:has(.resume-sheet)):not(.resume-sheet):not(.resume-sheet *) { display: none !important; }
+  .resume-sheet { width: auto; margin: 0; padding: 0; border-radius: 0; font-size: 11pt; color: #000; background: #fff; }
+  .resume-sheet h2 { font-size: 20pt; }
+  .resume-sheet h3 { font-size: 10pt; }
+}

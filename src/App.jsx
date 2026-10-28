@@ -79,6 +79,7 @@ import AdminLoginPage from './admin/AdminLoginPage'
 import AdminDashboardPage from './admin/AdminDashboardPage'
 import { track } from './lib/track'
 import JobAlertSignup from './alerts/JobAlertSignup'
+import ResumeBuilder from './resume/ResumeBuilder'
 import AlertPage from './alerts/AlertPages'
 import LandingLinks from './LandingLinks'
 import ShareButtons from './share/ShareButtons'
@@ -117,7 +118,7 @@ const coverLetterPages = ['cover-letter', 'cover-letter-result']
 const interviewPrepPages = ['interview-prep', 'interview-prep-result']
 const aiToolPages = [...resumeCheckerPages, ...coverLetterPages, ...interviewPrepPages, 'bundle']
 const alertPages = ['alerts-confirm', 'alerts-unsubscribe']
-const seekerPages = ['seeker-login', 'seeker-verify', 'seeker-profile', 'seeker-jobs']
+const seekerPages = ['seeker-login', 'seeker-verify', 'seeker-profile', 'seeker-jobs', 'resume']
 const LEGAL_LAST_UPDATED = 'October 20, 2026'
 
 const privacyPolicySections = [
@@ -398,6 +399,7 @@ const pageTitleOverrides = {
   businesses: 'Local Businesses',
   'list-business': 'Post a Job',
   'submit-resume': 'Submit Your Resume',
+  resume: 'Build a free resume',
 }
 
 function pageTitle(page, jobId, job) {
@@ -425,6 +427,7 @@ function Shell({ currentPage, setCurrentPage, employerSession, adminSession, onL
 
   const navItems = [
     { key: 'jobs', label: 'Jobs', icon: Briefcase },
+    { key: 'resume', label: 'Build a resume \u00b7 free', icon: FileText },
     { key: 'businesses', label: 'Businesses', icon: Building2 },
     { key: 'resume-checker', label: 'Resume Check', icon: Sparkles },
     { key: 'cover-letter', label: 'Cover Letter', icon: FileText },
@@ -828,6 +831,9 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
   }, [jobs, search, industry, type])
 
   const heading = landing ? landing.h1 : HOME_TITLE
+  const matchesList = (list, job) => [].concat(list).some((option) => option.toLowerCase() === String(job.industry || '').toLowerCase())
+  const activeWork = SITE.workTypes.find(([label]) => workSlug(label) === work)
+  const activeWorkEmpty = !!activeWork && !loading && !jobs.some((job) => matchesList(activeWork[1], job))
   const filterSelect = 'appearance-none bg-transparent pr-1 text-sm text-slate-100 outline-none'
 
   // Browse chips + email alert sit after the first 8 jobs (and under "no results").
@@ -838,8 +844,23 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
           <LandingLinks heading="Browse by" onNavigate={onBrowse} className="my-4" />
         </div>
       )}
-      <div className="my-4">
-        <JobAlertSignup jobs={jobs} keywords={search} />
+      {!activeWorkEmpty && (
+        <div className="my-4">
+          <JobAlertSignup jobs={jobs} keywords={search} />
+        </div>
+      )}
+      <div className="my-4 flex flex-col gap-3 rounded-[30px] border border-slate-800 bg-slate-900/85 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+        <div>
+          <h3 className="text-base font-semibold text-white">Need a resume? Build one free in 2 minutes</h3>
+          <p className="mt-1 text-sm leading-6 text-slate-400">No experience needed. Download it, copy it, or save it to your account.</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => onBrowse('resume')}
+          className="min-h-[48px] shrink-0 rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+        >
+          Build my resume
+        </button>
       </div>
     </>
   )
@@ -865,7 +886,7 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
                     onClick={() => pickIndustry(list, slug)}
                     className={`flex min-h-[44px] grow basis-[calc(50%-0.25rem)] items-center justify-center rounded-2xl border px-3 py-2 text-center text-sm font-semibold transition sm:grow-0 sm:basis-auto ${on ? 'border-cyan-400 bg-cyan-400 text-slate-950' : 'border-slate-700 bg-slate-900/85 text-slate-200 hover:border-cyan-400/40'}`}
                   >
-                    {label}
+                    {loading ? label : `${label} \u00b7 ${list === 'All Industries' ? jobs.length : jobs.filter((job) => matchesList(list, job)).length}`}
                   </button>
                 )
               })}
@@ -913,8 +934,14 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
           <EmptyState
             icon={Briefcase}
             title="No jobs found"
-            body="Try adjusting your search or filters to see more local opportunities."
+            body={activeWorkEmpty ? `No ${activeWork[0]} jobs listed right now. Get an email the moment one is posted.` : 'Try adjusting your search or filters to see more local opportunities.'}
           />
+          {activeWorkEmpty && (
+            <div className="my-4">
+              {/* the compact form can prefill one industry; chips that span several use the full form */}
+              {activeWork[1].length === 1 ? <JobAlertSignup compact category={activeWork[1][0]} /> : <JobAlertSignup jobs={jobs} />}
+            </div>
+          )}
           {afterJobs}
         </>
       ) : (
@@ -967,7 +994,7 @@ function JobsPage({ jobs, loading, onViewJob, landing = null, onBrowse }) {
   )
 }
 
-function JobDetailPage({ job, loading, error, onBack, onApply }) {
+function JobDetailPage({ job, loading, error, onBack, onApply, onBuildResume }) {
   if (loading) {
     return (
       <div className="mx-auto max-w-5xl">
@@ -1045,6 +1072,13 @@ function JobDetailPage({ job, loading, error, onBack, onApply }) {
                 Apply for this job
               </button>
             )}
+            <button
+              type="button"
+              onClick={onBuildResume}
+              className="min-h-[44px] text-left text-sm text-slate-400 underline decoration-slate-600 underline-offset-4 transition hover:text-cyan-300 md:text-right"
+            >
+              No resume? Build one free in 2 minutes &rarr;
+            </button>
             <ShareButtons jobId={job.id} title={`${job.title} - ${job.company}`} />
           </div>
         }
@@ -2754,6 +2788,7 @@ export default function TarboroJobsHomepage() {
           error={publicJobError}
           onBack={() => navigateToPage('jobs', null)}
           onApply={() => navigateToPage('job-apply', selectedPublicJobId)}
+          onBuildResume={() => navigateToPage('resume')}
         />
       )}
       {currentPage === 'businesses' && (
@@ -2830,6 +2865,7 @@ export default function TarboroJobsHomepage() {
       )}
       {currentPage === 'bundle' && <BundlePage />}
       {alertPages.includes(currentPage) && <AlertPage page={currentPage} />}
+      {currentPage === 'resume' && <ResumeBuilder />}
       {currentPage === 'seeker-login' && <SeekerSignInPage />}
       {currentPage === 'seeker-verify' && <SeekerVerifyPage />}
       {currentPage === 'seeker-profile' && <SeekerProfilePage jobs={jobs} />}
