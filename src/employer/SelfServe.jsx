@@ -3,7 +3,7 @@
 // status badges, the Pay $29 / Repost buttons and the AI "Write it for me".
 import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, CreditCard, MailCheck, RefreshCw, Sparkles } from 'lucide-react'
-import { draftJobDescription, signupEmployer, startEmployerJobPayment, verifyEmployerEmail } from './api'
+import { draftJobDescription, signupEmployer, startEmployerJobPayment, startEmployerPlanUpgrade, verifyEmployerEmail } from './api'
 import { getStoredEmployerToken, setStoredEmployerToken } from './auth'
 import { track } from '../lib/track'
 
@@ -186,6 +186,28 @@ export function EmployerJobPaidPage({ setCurrentPage, signedIn }) {
   )
 }
 
+// After Square's redirect for the $49/month plan. The webhook flips the plan
+// a moment later, so the employer profile is reloaded now and again shortly.
+export function EmployerPlanUpgradedPage({ setCurrentPage, signedIn, reloadProfile }) {
+  // App recreates reloadProfile every render; a dependency on it would loop.
+  const reload = useRef(reloadProfile)
+  reload.current = reloadProfile
+  useEffect(() => {
+    window.history.replaceState({}, '', '/')
+    reload.current?.()
+    const timer = window.setTimeout(() => reload.current?.(), 8000)
+    return () => window.clearTimeout(timer)
+  }, [])
+  return (
+    <LandingCard icon={CheckCircle2} title="Payment received">
+      <p>Your unlimited plan is active once Square confirms payment — usually within a minute. Any jobs waiting on payment go live then.</p>
+      <button type="button" className={buttonClass} onClick={() => setCurrentPage(signedIn ? 'employer-dashboard' : 'employer-login')}>
+        Go to my dashboard
+      </button>
+    </LandingCard>
+  )
+}
+
 const BADGES = {
   pending_review: ['Pending review', 'border-amber-400/30 bg-amber-400/10 text-amber-200'],
   awaiting_payment: ['Awaiting payment', 'border-violet-400/30 bg-violet-400/10 text-violet-200'],
@@ -201,6 +223,39 @@ export function JobStatusBadge({ status, fallback }) {
 
 function canPayForJob(status) {
   return ['awaiting_payment', 'expired', 'closed', 'filled'].includes(status)
+}
+
+// Starts the $49/month plan checkout for a pay-per-post employer.
+export function UpgradePlanButton({ label = 'Switch to unlimited — $49/month', className }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleClick() {
+    setBusy(true)
+    setError('')
+    try {
+      const data = await startEmployerPlanUpgrade(getStoredEmployerToken())
+      track('checkout_start', { product: 'employer_plan_upgrade' })
+      window.location.assign(data.checkout_url)
+    } catch (err) {
+      setError(err.message || 'Could not start the checkout.')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={busy}
+        className={className || 'inline-flex items-center gap-1.5 rounded-2xl border border-cyan-400/40 bg-transparent px-3 py-2 text-xs font-semibold text-cyan-200 transition hover:bg-cyan-400/10 disabled:cursor-not-allowed disabled:opacity-60'}
+      >
+        {busy ? 'Opening Square…' : label}
+      </button>
+      {error ? <span className="w-full text-xs text-rose-300">{error}</span> : null}
+    </>
+  )
 }
 
 export function PayForJobButton({ job }) {
@@ -230,8 +285,9 @@ export function PayForJobButton({ job }) {
         className="inline-flex items-center gap-1.5 rounded-2xl border border-cyan-400/30 bg-cyan-400 px-3 py-2 text-xs font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
       >
         <CreditCard className="h-3.5 w-3.5" />
-        {busy ? 'Opening Square…' : job.status === 'awaiting_payment' ? `Pay ${JOB_POST_PRICE_LABEL} to publish` : `Repost for ${JOB_POST_PRICE_LABEL}`}
+        {busy ? 'Opening Square…' : job.status === 'awaiting_payment' ? `Publish this job — ${JOB_POST_PRICE_LABEL}` : `Repost for ${JOB_POST_PRICE_LABEL}`}
       </button>
+      <UpgradePlanButton label="Unlimited posts — $49/month" />
       {error ? <span className="w-full text-xs text-rose-300">{error}</span> : null}
     </>
   )

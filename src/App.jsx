@@ -74,7 +74,7 @@ import EmployerDashboardPage from './employer/EmployerDashboardPage'
 import EmployerForgotPasswordPage from './employer/EmployerForgotPasswordPage'
 import EmployerResetPasswordPage from './employer/EmployerResetPasswordPage'
 import CandidateActionPanel from './employer/CandidateActionPanel'
-import { EmployerJobPaidPage, EmployerPricing, EmployerSignupForm, EmployerVerifyPage } from './employer/SelfServe'
+import { EmployerJobPaidPage, EmployerPlanUpgradedPage, EmployerPricing, EmployerSignupForm, EmployerVerifyPage } from './employer/SelfServe'
 import AdminLoginPage from './admin/AdminLoginPage'
 import AdminDashboardPage from './admin/AdminDashboardPage'
 import { track } from './lib/track'
@@ -375,7 +375,7 @@ function getInitialRoute() {
   }
   // Self-serve signup links from emails and the Square redirect.
   if (page === 'employer-verify' && token) return { page, jobId: null }
-  if (['employer-job-paid', 'employer-login', 'employer-forgot-password', 'list-business'].includes(page)) return { page, jobId: null }
+  if (['employer-job-paid', 'employer-plan-upgraded', 'employer-login', 'employer-forgot-password', 'list-business'].includes(page)) return { page, jobId: null }
   // Landing pages use their slug as the page key.
   const landing = findLandingPage(pathname)
   if (landing) return { page: landing.slug, jobId: null }
@@ -2794,6 +2794,9 @@ export default function TarboroJobsHomepage() {
       )}
       {currentPage === 'employer-job-paid' && (
         <EmployerJobPaidPage setCurrentPage={setCurrentPage} signedIn={!!employerSession} />
+      )}
+      {currentPage === 'employer-plan-upgraded' && (
+        <EmployerPlanUpgradedPage setCurrentPage={setCurrentPage} signedIn={!!employerSession} reloadProfile={loadEmployerSession} />
       )}
       {currentPage === 'employer-login' && (
         <EmployerLoginPage

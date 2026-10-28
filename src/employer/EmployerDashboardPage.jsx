@@ -33,7 +33,7 @@ import {
 import { clearStoredEmployerToken, getStoredEmployerToken } from './auth'
 import { EMPLOYER_AUTH_EXPIRED_EVENT } from './api'
 import FeatureJobControl from '../featured/FeatureJobControl'
-import { AiDraftButton, JobStatusBadge, PayForJobButton } from './SelfServe'
+import { AiDraftButton, JobStatusBadge, PayForJobButton, UpgradePlanButton } from './SelfServe'
 import { track } from '../lib/track'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
@@ -287,9 +287,8 @@ export default function EmployerDashboardPage({
   const liveDays = payPerPost ? postDays : 14
   const upgradeNote = (
     <>
-      Want unlimited posts and candidate tools? Email{' '}
-      <a href="mailto:jobs@tarborojobs.com?subject=%2449%2Fmonth%20plan" className="font-semibold underline">jobs@tarborojobs.com</a>{' '}
-      about the $49/month plan.
+      Want unlimited posts and candidate tools?{' '}
+      <span className="mt-2 flex flex-wrap gap-2"><UpgradePlanButton label="Switch to unlimited — $49/month" /></span>
     </>
   )
   // The verify page sends new employers here with ?tab=jobs.

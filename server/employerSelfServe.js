@@ -59,6 +59,84 @@ export function resolvePayPerPostStatus(currentStatus, requestedStatus) {
   }
 }
 
+// Square webhook, COMPLETED payment on a subscription checkout that carries
+// employer_id: the pay-per-post employer bought the $49/month plan. Converts
+// them in place and opens the jobs the $29 gate was holding. Applied once per
+// checkout row (row-locked, checkout_status 'created' -> 'upgraded'); a replay
+// is a no-op. Throws on database errors so the webhook can answer 500 and
+// Square retries.
+export async function applyPlanUpgrade(pool, { checkout, payment, postDays }) {
+  const paidCents = Number(payment?.amount_money?.amount) || 0
+  const paidCurrency = String(payment?.amount_money?.currency || '').toUpperCase()
+  const orderMismatch = checkout.square_order_id && payment?.order_id && checkout.square_order_id !== payment.order_id
+  if (
+    String(payment?.status || '').toLowerCase() !== 'completed' ||
+    paidCents < Number(checkout.amount_cents) ||
+    paidCurrency !== String(checkout.currency || '').toUpperCase() ||
+    orderMismatch
+  ) {
+    console.error(
+      `[plan-upgrade] checkout ${checkout.checkout_ref}: payment ${payment?.id} of ${paidCents} ${paidCurrency} (Square order ${payment?.order_id}) does not match ${checkout.amount_cents} ${checkout.currency} (Square order ${checkout.square_order_id}); employer not upgraded`
+    )
+    return { applied: false, reason: 'payment_mismatch' }
+  }
+
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    const [[locked]] = await connection.query(
+      `SELECT checkout_status FROM employer_pending_checkouts WHERE id = ? FOR UPDATE`,
+      [checkout.id]
+    )
+    if (!locked || locked.checkout_status !== 'created') {
+      await connection.commit()
+      return { applied: false, reason: 'already_applied' }
+    }
+
+    const [[employer]] = await connection.query(`SELECT id, plan FROM employers WHERE id = ? FOR UPDATE`, [checkout.employer_id])
+    if (employer?.plan !== 'pay_per_post') {
+      console.error(
+        `[plan-upgrade] checkout ${checkout.checkout_ref}: employer ${checkout.employer_id} ${employer ? 'is already on the monthly plan' : 'no longer exists'} but payment ${payment.id} was taken; refund it in Square if it is a duplicate.`
+      )
+      await connection.query(`UPDATE employer_pending_checkouts SET checkout_status = 'duplicate', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, [checkout.id])
+      await connection.commit()
+      return { applied: false, reason: 'not_upgradable' }
+    }
+
+    // access_status is left alone: an admin deactivation must survive a payment.
+    await connection.query(
+      `
+      UPDATE employers
+      SET plan = 'subscription',
+        square_customer_id = COALESCE(?, square_customer_id),
+        square_subscription_id = COALESCE(?, square_subscription_id),
+        subscription_status = 'active',
+        subscription_synced_at = NULL,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `,
+      [payment.customer_id || null, checkout.square_subscription_id || null, employer.id]
+    )
+    // Jobs held by the $29 gate or the free-post review go live for the monthly-plan lifetime.
+    const [published] = await connection.query(
+      `
+      UPDATE job_posts
+      SET status = 'open', published_at = ?, expires_at = ?, expired_at = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE employer_id = ? AND source_url IS NULL AND status IN ('awaiting_payment', 'pending_review')
+      `,
+      [new Date(), addDaysFromNow(postDays), employer.id]
+    )
+    await connection.query(`UPDATE employer_pending_checkouts SET checkout_status = 'upgraded', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, [checkout.id])
+    await connection.commit()
+    return { applied: true, published: published.affectedRows }
+  } catch (error) {
+    await connection.rollback()
+    throw error
+  } finally {
+    connection.release()
+  }
+}
+
 export function registerEmployerSelfServe({
   app,
   pool,

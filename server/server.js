@@ -22,7 +22,7 @@ import { register as registerSeekers } from './seekers.js'
 import { register as registerIndexNow } from './indexnow.js'
 import { createSeo } from './seo.js'
 import { register as registerFeatured, orderFeaturedFirst, isFeatured } from './featured.js'
-import { registerEmployerSelfServe, resolvePayPerPostStatus, JOB_POST_PRICE_CENTS, PAID_POST_DAYS } from './employerSelfServe.js'
+import { registerEmployerSelfServe, resolvePayPerPostStatus, applyPlanUpgrade, JOB_POST_PRICE_CENTS, PAID_POST_DAYS } from './employerSelfServe.js'
 
 dotenv.config()
 
@@ -785,17 +785,17 @@ function buildEmployerPasswordResetUrl(token) {
   return `${EMPLOYER_PASSWORD_RESET_BASE_URL}${separator}page=employer-reset-password&token=${encodeURIComponent(token)}`
 }
 
-function buildEmployerPaymentSuccessUrl(checkoutRef) {
+function buildEmployerPaymentSuccessUrl(checkoutRef, page = 'employer-payment-success') {
   if (!APP_BASE_URL) return null
 
   try {
     const url = new URL(APP_BASE_URL)
-    url.searchParams.set('page', 'employer-payment-success')
+    url.searchParams.set('page', page)
     url.searchParams.set('checkout_ref', checkoutRef)
     return url.toString()
   } catch {
     const separator = APP_BASE_URL.includes('?') ? '&' : '?'
-    return `${APP_BASE_URL}${separator}page=employer-payment-success&checkout_ref=${encodeURIComponent(checkoutRef)}`
+    return `${APP_BASE_URL}${separator}page=${page}&checkout_ref=${encodeURIComponent(checkoutRef)}`
   }
 }
 
@@ -914,12 +914,12 @@ async function resolveSquareSubscriptionPlanVariationId() {
   )
 }
 
-async function createSquareEmployerCheckoutLink({ checkoutRef, email, businessName }) {
+async function createSquareEmployerCheckoutLink({ checkoutRef, email, businessName, page }) {
   if (!isSquareCheckoutConfigured()) {
     throw new Error('Square checkout is not configured. Set the Square access token, location ID, subscription plan variation ID, and webhook signature key first.')
   }
 
-  const redirectUrl = buildEmployerPaymentSuccessUrl(checkoutRef)
+  const redirectUrl = buildEmployerPaymentSuccessUrl(checkoutRef, page)
   if (!redirectUrl) {
     throw new Error('Employer payment success URL is not configured.')
   }
@@ -1308,7 +1308,8 @@ async function finalizeVerifiedEmployerCheckoutByRef(checkoutRef) {
       return null
     }
 
-    if (checkout.checkout_status === 'already_onboarded') {
+    // Plan upgrades of an existing employer are applied by applyPlanUpgrade.
+    if (checkout.checkout_status === 'already_onboarded' || checkout.employer_id) {
       await connection.commit()
       return checkout
     }
@@ -1915,6 +1916,15 @@ async function ensureEmployerPendingCheckoutsTable() {
       KEY idx_employer_pending_checkouts_status (payment_status, checkout_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
+  // Set when a signed-in pay-per-post employer buys the monthly plan: the
+  // webhook then converts that employer instead of onboarding a new one.
+  try {
+    if (!(await tableColumnExists('employer_pending_checkouts', 'employer_id'))) {
+      await pool.query('ALTER TABLE employer_pending_checkouts ADD COLUMN employer_id BIGINT UNSIGNED NULL DEFAULT NULL')
+    }
+  } catch (error) {
+    console.error('STARTUP: could not add employer_pending_checkouts.employer_id; plan upgrades will fail until fixed:', error?.message || error)
+  }
 }
 
 async function expireOpenJobs() {
@@ -2651,6 +2661,58 @@ async function createJobApplication(job, applicant, resumeFile, onSaved = () => 
   return { id: result.insertId, resumeFileUrl, ats }
 }
 
+// One Square subscription checkout link plus its pending row; shared by
+// start-checkout (new employer) and upgrade-checkout (existing employer).
+async function createPendingEmployerCheckout({ email, businessName, page }) {
+  const checkoutRef = `tj_${crypto.randomBytes(12).toString('hex')}`
+  const squareCheckout = await createSquareEmployerCheckoutLink({
+    checkoutRef,
+    email,
+    businessName,
+    page,
+  })
+
+  if (!squareCheckout.checkoutUrl || !squareCheckout.orderId) return null
+
+  await pool.query(
+    `
+    INSERT INTO employer_pending_checkouts
+    (
+      checkout_ref,
+      idempotency_key,
+      email,
+      business_name,
+      plan_key,
+      amount_cents,
+      currency,
+      square_payment_link_id,
+      square_order_id,
+      square_checkout_url,
+      square_checkout_long_url,
+      payment_status,
+      checkout_status,
+      expires_at
+    )
+    VALUES (?, ?, ?, ?, 'employer-monthly', ?, ?, ?, ?, ?, ?, 'pending', 'created', ?)
+    `,
+    [
+      checkoutRef,
+      squareCheckout.idempotencyKey,
+      email,
+      businessName,
+      SQUARE_EMPLOYER_PLAN_AMOUNT_CENTS,
+      SQUARE_EMPLOYER_PLAN_CURRENCY,
+      squareCheckout.paymentLinkId,
+      squareCheckout.orderId,
+      squareCheckout.checkoutUrl,
+      squareCheckout.checkoutLongUrl,
+      addDays(2),
+    ]
+  )
+
+  return { checkoutRef, squareCheckout }
+}
+
 app.post('/api/employer-plan/start-checkout', async (req, res) => {
   try {
     if (!isSquareCheckoutConfigured()) {
@@ -2695,55 +2757,14 @@ app.post('/api/employer-plan/start-checkout', async (req, res) => {
       })
     }
 
-    const checkoutRef = `tj_${crypto.randomBytes(12).toString('hex')}`
-    const squareCheckout = await createSquareEmployerCheckoutLink({
-      checkoutRef,
-      email,
-      businessName,
-    })
-
-    if (!squareCheckout.checkoutUrl || !squareCheckout.orderId) {
+    const created = await createPendingEmployerCheckout({ email, businessName })
+    if (!created) {
       return res.status(500).json({
         success: false,
         error: 'Square did not return a valid checkout session.',
       })
     }
-
-    await pool.query(
-      `
-      INSERT INTO employer_pending_checkouts
-      (
-        checkout_ref,
-        idempotency_key,
-        email,
-        business_name,
-        plan_key,
-        amount_cents,
-        currency,
-        square_payment_link_id,
-        square_order_id,
-        square_checkout_url,
-        square_checkout_long_url,
-        payment_status,
-        checkout_status,
-        expires_at
-      )
-      VALUES (?, ?, ?, ?, 'employer-monthly', ?, ?, ?, ?, ?, ?, 'pending', 'created', ?)
-      `,
-      [
-        checkoutRef,
-        squareCheckout.idempotencyKey,
-        email,
-        businessName,
-        SQUARE_EMPLOYER_PLAN_AMOUNT_CENTS,
-        SQUARE_EMPLOYER_PLAN_CURRENCY,
-        squareCheckout.paymentLinkId,
-        squareCheckout.orderId,
-        squareCheckout.checkoutUrl,
-        squareCheckout.checkoutLongUrl,
-        addDays(2),
-      ]
-    )
+    const { checkoutRef, squareCheckout } = created
 
     res.json({
       success: true,
@@ -2759,6 +2780,62 @@ app.post('/api/employer-plan/start-checkout', async (req, res) => {
       success: false,
       error: 'Failed to start secure employer checkout.',
     })
+  }
+})
+
+// A signed-in pay-per-post employer switching to the $49/month plan: the same
+// Square subscription link as start-checkout, but the pending row carries
+// employer_id so the webhook converts this employer (applyPlanUpgrade).
+app.post('/api/employer/plan/upgrade-checkout', requireEmployerAuth, async (req, res) => {
+  try {
+    const employer = { ...req.auth.employer, ...req.auth.billing }
+    if (
+      employer.plan !== 'pay_per_post' ||
+      !employer.onboarding_completed ||
+      employer.access_status !== 'active' ||
+      hasSubscriptionFeatures(employer)
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: 'Only active pay-per-post accounts can switch to the monthly plan.',
+      })
+    }
+
+    if (!isSquareCheckoutConfigured()) {
+      return res.status(503).json({ success: false, error: 'Plan checkout is not available right now.' })
+    }
+
+    // Reuse an unpaid link so a double click cannot buy two subscriptions.
+    const [open] = await pool.query(
+      `
+      SELECT square_checkout_url
+      FROM employer_pending_checkouts
+      WHERE employer_id = ? AND checkout_status = 'created' AND payment_status = 'pending'
+        AND expires_at > CURRENT_TIMESTAMP AND square_checkout_url IS NOT NULL
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [req.auth.employer_id]
+    )
+    if (open[0]) return res.json({ success: true, checkout_url: open[0].square_checkout_url })
+
+    const created = await createPendingEmployerCheckout({
+      email: normalizeEmail(employer.email),
+      businessName: employer.business_name,
+      page: 'employer-plan-upgraded',
+    })
+    if (!created) {
+      return res.status(500).json({ success: false, error: 'Square did not return a valid checkout session.' })
+    }
+    await pool.query(`UPDATE employer_pending_checkouts SET employer_id = ? WHERE checkout_ref = ?`, [
+      req.auth.employer_id,
+      created.checkoutRef,
+    ])
+
+    res.json({ success: true, checkout_url: created.squareCheckout.checkoutUrl })
+  } catch (error) {
+    console.error('POST /api/employer/plan/upgrade-checkout error:', error)
+    res.status(500).json({ success: false, error: 'Could not start the plan checkout. Please try again.' })
   }
 })
 
@@ -2924,7 +3001,19 @@ app.post('/api/square/webhook', async (req, res) => {
       ]
     )
 
-    if (paymentStatus === 'completed') {
+    // An existing pay-per-post employer bought the monthly plan: convert that
+    // employer in place. Errors fall through to the 500 below so Square
+    // retries; applyPlanUpgrade is idempotent per checkout row.
+    if (paymentStatus === 'completed' && checkout.employer_id) {
+      const upgrade = await applyPlanUpgrade(pool, { checkout, payment, postDays: JOB_POST_EXPIRATION_DAYS })
+      if (upgrade.applied) {
+        if (!payment.customer_id) console.error(`[plan-upgrade] checkout ${checkout.checkout_ref}: payment has no customer_id; employer ${checkout.employer_id} will not lapse until linked to Square by hand.`)
+        // Learn the subscription id and paid-through date; never blocks the webhook.
+        syncEmployerSubscription({ id: checkout.employer_id, square_customer_id: payment.customer_id || null }).catch((error) =>
+          console.error(`[subscriptions] post-upgrade sync for employer ${checkout.employer_id} failed; access left as-is:`, error?.message || error)
+        )
+      }
+    } else if (paymentStatus === 'completed') {
       try {
         await finalizeVerifiedEmployerCheckoutByRef(checkout.checkout_ref)
         syncEmployerAfterCheckout(checkout, payment).catch((error) =>

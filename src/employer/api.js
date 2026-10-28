@@ -222,6 +222,13 @@ export async function startEmployerJobPayment(tokenOverride, jobId) {
   })
 }
 
+export async function startEmployerPlanUpgrade(tokenOverride) {
+  return requestJson(`${API_BASE}/employer/plan/upgrade-checkout`, {
+    method: 'POST',
+    headers: buildAuthHeaders(tokenOverride, true),
+  })
+}
+
 export async function draftJobDescription(tokenOverride, payload) {
   return requestJson(`${API_BASE}/employer/jobs/ai-draft`, {
     method: 'POST',
