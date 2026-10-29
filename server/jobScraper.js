@@ -701,6 +701,55 @@ export async function scrapeSheetz() {
   return finish('sheetz', [...found.values()], partial)
 }
 
+// Adzuna aggregator (https://developer.adzuna.com): the restaurants, stores and care agencies
+// that have no scrapeable careers site of their own. Needs ADZUNA_APP_ID + ADZUNA_APP_KEY;
+// skips silently without them. Each listing is credited "via Adzuna" and links to Adzuna's
+// redirect, as their terms require. One call per page, 50 per page, 3 pages at most.
+const ADZUNA_CATEGORY_INDUSTRY = [
+  [/hospitality|catering/i, 'Food Service'],
+  [/retail/i, 'Retail'],
+  [/healthcare|nursing|social work/i, 'Healthcare'],
+  [/logistics|warehouse|manufacturing/i, 'Manufacturing'],
+  [/trade|construction/i, 'Construction'],
+  [/teaching|education/i, 'Education'],
+  [/driver|transport/i, 'Transportation'],
+  [/admin|customer service|accounting|hr|legal|consultancy|pr|sales/i, 'Professional Services'],
+  [/it jobs|engineering/i, 'Information Technology'],
+]
+export async function scrapeAdzuna() {
+  const appId = process.env.ADZUNA_APP_ID
+  const appKey = process.env.ADZUNA_APP_KEY
+  if (!appId || !appKey) return [] // skip silently if not configured
+  const found = new Map()
+  let partial = false
+  for (let page = 1; page <= 3; page++) {
+    const url = `https://api.adzuna.com/v1/api/jobs/us/search/${page}?app_id=${encodeURIComponent(appId)}&app_key=${encodeURIComponent(appKey)}&results_per_page=50&where=${encodeURIComponent('Tarboro, NC')}&distance=25&sort_by=date&content-type=application/json`
+    const data = await (await fetchOk(url, { headers: WEB_JSON })).json()
+    if (!Array.isArray(data?.results)) throw new Error('adzuna: search response not understood')
+    for (const r of data.results) {
+      const area = Array.isArray(r.location?.area) ? r.location.area : []
+      const city = townOf(area[area.length - 1]) || townOf(String(r.location?.display_name ?? '').split(',')[0])
+      if (!city || !r.id || !r.title) continue
+      const company = String(r.company?.display_name ?? '').trim() || 'Local employer'
+      const category = String(r.category?.label ?? '')
+      const industry = (ADZUNA_CATEGORY_INDUSTRY.find(([re]) => re.test(category)) ?? [null, 'Other'])[1]
+      const pay = r.salary_min ? `$${Math.round(r.salary_min)}${r.salary_max && r.salary_max !== r.salary_min ? ` - $${Math.round(r.salary_max)}` : ''}${r.salary_min < 200 ? '/hour' : '/year'}` : ''
+      found.set(String(r.id), chainJob({
+        title: decodeEntities(r.title).replace(/\s+/g, ' ').trim(), company, city, industry, source: 'adzuna', id: r.id,
+        url: r.redirect_url, type: r.contract_time === 'part_time' ? 'Part-Time' : r.contract_time === 'full_time' ? 'Full-Time' : '',
+        desc: `${htmlToText(r.description ?? '')}\n\nListed via Adzuna.`.trim(), payText: pay,
+      }))
+    }
+    if (data.results.length < 50 || page * 50 >= Number(data.count || 0)) break
+    if (page === 3 && Number(data.count || 0) > 150) partial = true
+    await sleep(300)
+  }
+  if (!found.size) return [] // nothing within our towns is not an error for an aggregator
+  const jobs = [...found.values()]
+  jobs.partial = partial
+  return jobs
+}
+
 // Workday career sites: POST /wday/cxs/<tenant>/<site>/jobs per search term, then the posting's detail JSON.
 // locationsText is not always a city ("Hardees of Tarboro"), so a hit must name the town in title or location.
 async function scrapeWorkday({ host, tenant, site, towns, source, company, industry }) {
@@ -835,6 +884,7 @@ const SCRAPERS = [
   { name: 'sheetz', fn: scrapeSheetz },
   { name: 'hardees', fn: scrapeHardees },
   { name: 'pfizer_rm', fn: scrapePfizerRockyMount },
+  { name: 'adzuna', fn: scrapeAdzuna },
 ]
 
 export async function runAllScrapers(pool) {
